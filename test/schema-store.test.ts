@@ -4,12 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
 import { DEFAULT_REFRESH_SECONDS, readSchemaStoreConfig, SchemaStore, type SchemaStoreOptions } from "../src/schema-store.ts";
 import { redactedSchemaFile, schemaFile } from "../src/schemas.ts";
 import { buildLogSources } from "../src/sources/index.ts";
-import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, textOf } from "./helpers.ts";
+import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, textOf, untouchable } from "./helpers.ts";
 
 const FIXTURES = new URL("./fixtures/schemas/", import.meta.url);
 const shopLogs = readFileSync(new URL("shop.hyde-json.json", FIXTURES), "utf8");
@@ -235,10 +234,3 @@ describe("SchemaStore without a token (developer mode)", () => {
     expect(s.logSchemas.size + s.redactedSchemas.size).toBe(0);
   });
 });
-
-/** A database that fails the test if anything reaches it. */
-const untouchable: Databases = {
-  has: () => true,
-  connect: () => Promise.reject(new Error("reached the database")),
-  close: async () => {},
-};
