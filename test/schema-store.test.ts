@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoki } from "../src/loki.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { DEFAULT_REFRESH_SECONDS, readSchemaStoreConfig, SchemaStore, type SchemaStoreOptions } from "../src/schema-store.ts";
 import { redactedSchemaFile, schemaFile } from "../src/schemas.ts";
 import { buildLogSources } from "../src/sources/index.ts";
@@ -156,7 +157,7 @@ describe("SchemaStore with a token (GitHub)", () => {
 
     const client = await connectInMemory({
       logs: { sources: buildLogSources({ registry: REGISTRY, schemas: s.logSchemas, env: {} }), loki: createLoki({ url: "https://loki.invalid", token: "t", fetch: () => Promise.reject(new Error("reached Loki")) }) },
-      sql: { databases: untouchable, schemas: s.redactedSchemas },
+      sql: sqlReadiness({ databases: untouchable, schemas: s.redactedSchemas }),
     });
     const logs = await client.callTool({ name: "query_logs", arguments: { app: "crm" } });
     expect(logs.isError).toBe(true);

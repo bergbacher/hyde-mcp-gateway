@@ -45,7 +45,7 @@ export async function connectInMemory(
 ) {
   const { principal = ALL_APPS, ...rest } = options;
   const [a, b] = InMemoryTransport.createLinkedPair();
-  await createServer(principal, { registry: REGISTRY, ...rest }).connect(a);
+  await createServer(principal, { registry: REGISTRY, ...rest }).server.connect(a);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(b);
   return client;

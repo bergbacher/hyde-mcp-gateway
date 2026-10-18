@@ -1,29 +1,52 @@
 // The SQL tools: `describe_schema` and `query_sql` read the app's redacted
 // database (D2), whose privileges are the boundary, and its redacted schema.
-// An app that lacks either is refused before the database is asked (D37).
+// Whether an app has both is asked of its SQL readiness (sqlReadiness, built
+// once at boot, src/boot.ts), which reads the schema store's live map per
+// call (D58); an app that lacks either is refused before the database is
+// asked (D37).
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { guardStatement } from "../db/guard.ts";
-import { DEFAULT_LIMIT, MAX_LIMIT, type Databases } from "../db/pool.ts";
+import { DEFAULT_LIMIT, MAX_LIMIT, type Databases, type QueryResult } from "../db/pool.ts";
 import { appVariables, type App } from "../registry.ts";
-import { appSchema, error, forApp, notConfigured, text, type Gate } from "./tool.ts";
+import { appSchema, error, forApp, notConfigured, text, type Gate, type Registrar } from "./tool.ts";
 
-export interface SqlOptions {
+export interface SqlInputs {
   databases: Databases;
-  /** Each app's redacted-schema.md, read per call (the schema store's live map, D58); a missing app is left out and refused (D37). */
+  /** Each app's redacted-schema.md: the schema store's live map (D58), read per call, so a refresh changes readiness; a missing app is left out (D37). */
   schemas: ReadonlyMap<App, string>;
 }
 
-/** What `app` lacks for `describe_schema` and `query_sql`, as their error names it; empty when ready. */
-export function sqlMissing(app: App, sql: SqlOptions | undefined): string[] {
-  return [
-    ...(sql?.schemas.has(app) ? [] : ["redacted schema is missing"]),
-    ...(sql?.databases.has(app) ? [] : [`${appVariables(app).redactedUrl} is not set`]),
-  ];
+/** An app ready for the SQL tools: its redacted schema and its redacted database. */
+export interface SqlHandle {
+  schema: string;
+  query(sql: string, limit: number | undefined): Promise<QueryResult>;
 }
 
-export function registerSqlTools(server: McpServer, gate: Gate, sql: SqlOptions) {
+/** Per app: ready for `describe_schema` and `query_sql`, or what it lacks as their error names it. */
+export interface SqlReadiness {
+  open(app: App): SqlHandle | { missing: string[] };
+  /** What `app` lacks; empty when ready. */
+  missing(app: App): string[];
+}
+
+/** The SQL readiness of every app: a question to the database module plus the redacted schemas. */
+export function sqlReadiness({ databases, schemas }: SqlInputs): SqlReadiness {
+  const missing = (app: App) => [
+    ...(schemas.has(app) ? [] : ["redacted schema is missing"]),
+    ...(databases.has(app) ? [] : [`${appVariables(app).redactedUrl} is not set`]),
+  ];
+  return {
+    missing,
+    open(app) {
+      const lacks = missing(app);
+      if (lacks.length > 0) return { missing: lacks };
+      return { schema: schemas.get(app)!, query: (sql, limit) => databases.query(app, sql, limit) };
+    },
+  };
+}
+
+export function registerSqlTools(server: Registrar, gate: Gate, sql: SqlReadiness) {
   server.registerTool(
     "describe_schema",
     {
@@ -33,9 +56,9 @@ export function registerSqlTools(server: McpServer, gate: Gate, sql: SqlOptions)
       annotations: { readOnlyHint: true },
     },
     forApp(gate, ({ app }) => {
-      const missing = sqlMissing(app, sql);
-      if (missing.length > 0) return notConfigured(app, missing);
-      return text(sql.schemas.get(app)!);
+      const ready = sql.open(app);
+      if ("missing" in ready) return notConfigured(app, ready.missing);
+      return text(ready.schema);
     }),
   );
 
@@ -54,12 +77,12 @@ export function registerSqlTools(server: McpServer, gate: Gate, sql: SqlOptions)
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     forApp(gate, async ({ app, sql: statement, limit }) => {
-      const missing = sqlMissing(app, sql);
-      if (missing.length > 0) return notConfigured(app, missing);
+      const ready = sql.open(app);
+      if ("missing" in ready) return notConfigured(app, ready.missing);
       const guarded = guardStatement(statement);
       if (!guarded.ok) return error(guarded.reason);
       try {
-        return text(JSON.stringify(await sql.databases.query(app, guarded.sql, limit)));
+        return text(JSON.stringify(await ready.query(guarded.sql, limit)));
       } catch (e) {
         return error(e instanceof Error ? e.message : String(e));
       }

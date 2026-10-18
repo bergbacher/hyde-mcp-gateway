@@ -65,7 +65,7 @@ async function connect(
   }) as typeof globalThis.fetch;
   const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch });
   const sources = buildLogSources({ registry: REGISTRY, schemas: logSchemas, edgeSchema: edgeSchema ?? undefined, env: {} });
-  const server = createServer(principal, { registry: REGISTRY, logs: { sources, loki, now: () => NOW } });
+  const { server } = createServer(principal, { registry: REGISTRY, logs: { sources, loki, now: () => NOW } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });

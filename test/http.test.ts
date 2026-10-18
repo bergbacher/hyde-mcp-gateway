@@ -7,6 +7,7 @@ import { readConfig } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import type { Loki } from "../src/loki.ts";
 import type { TokenVerifier } from "../src/mcp/auth.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { readFileSync } from "node:fs";
 import { parseSchema } from "hyde-json";
 import type { Schemas } from "../src/schemas.ts";
@@ -158,7 +159,7 @@ describe("http with GitHub tokens (D59)", () => {
       sources: buildLogSources({ registry: REGISTRY, schemas: fixtureSchemas(), env: {} }),
       loki,
     },
-    sql: { databases, schemas: new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]) },
+    sql: sqlReadiness({ databases, schemas: new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]) }),
     github: { fetch: github, now: () => clock },
   });
   let base: string;
