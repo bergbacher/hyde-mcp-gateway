@@ -158,6 +158,8 @@ describe("count_errors", () => {
     const body = (await call("count_errors", { app: "crm", hours: 24 })).json();
     // The fake answers the recorded response whatever the filter; counting is by the line's own action.
     expect(body).toEqual({
+      from: "2026-10-17T12:00:00.000Z",
+      until: "2026-10-18T12:00:00.000Z",
       rows: [{ action: "send-mail", count: 2 }, { action: "invite-member", count: 1 }],
       total: 3,
       partial: false,
@@ -343,6 +345,8 @@ describe("edge source (D46)", () => {
     const result = await call("count_errors", { app: "shop", hours: 168, source: "edge" });
     expect(result.isError).toBe(false);
     expect(result.json()).toEqual({
+      from: "2026-10-11T12:00:00.000Z",
+      until: "2026-10-18T12:00:00.000Z",
       rows: [
         { status: 502, action: "GET /api/sync", count: 2 },
         { status: 0, action: "GET /api/sync/outbox/pending", count: 1 },
@@ -373,6 +377,91 @@ describe("edge source (D46)", () => {
     const result = await withoutEdgeSchema.call("query_logs", { app: "shop", source: "edge" });
     expect(result).toMatchObject({ isError: true, text: "shop is not configured: schemas/edge.hyde-json.json is missing" });
     expect(withoutEdgeSchema.requests).toHaveLength(0);
+  });
+});
+
+describe("until (D62)", () => {
+  const HOUR_NS = 3_600_000_000_000n;
+  const ns = (iso: string) => BigInt(Date.parse(iso)) * 1_000_000n;
+  /** A shop line every 30 minutes over the last two days; like Loki, the fake answers only those in [start, end]. */
+  const lines = Array.from({ length: 97 }, (_, i) => {
+    const ms = NOW - i * 1_800_000;
+    return [String(BigInt(ms) * 1_000_000n), JSON.stringify({ action: `at-${new Date(ms).toISOString()}`, level: "error", message: "x" })];
+  });
+  const windowed: Respond = (url) => {
+    if (!url.pathname.endsWith("/query_range")) return vector(0);
+    const start = BigInt(url.searchParams.get("start")!), end = BigInt(url.searchParams.get("end")!);
+    const values = lines.filter(([t]) => BigInt(t!) >= start && BigInt(t!) <= end);
+    return Response.json({ status: "success", data: { resultType: "streams", result: [{ stream: {}, values }] } });
+  };
+  const rangeOf = (requests: { url: URL }[]) => requests.find((r) => r.url.pathname.endsWith("/query_range"))!.url.searchParams;
+
+  it("query_logs reads the hour before an until one day ago, and echoes the window", async () => {
+    const { call, requests } = await connect(windowed);
+    const result = await call("query_logs", { app: "shop", hours: 1, until: "2026-10-17T12:00:00Z" });
+    expect(result.isError).toBe(false);
+    const range = rangeOf(requests);
+    expect(range.get("start")).toBe(String(ns("2026-10-17T11:00:00Z")));
+    expect(range.get("end")).toBe(String(ns("2026-10-17T12:00:00Z")));
+    expect(BigInt(range.get("end")!) - BigInt(range.get("start")!)).toBe(HOUR_NS);
+    const instant = requests.find((r) => r.url.pathname === "/loki/api/v1/query")!.url.searchParams;
+    expect(instant.get("time")).toBe(String(ns("2026-10-17T12:00:00Z")));
+    const body = result.json();
+    expect(body).toMatchObject({ from: "2026-10-17T11:00:00.000Z", until: "2026-10-17T12:00:00.000Z", returned: 3 });
+    expect(body.lines.map((l: { timestamp: string }) => l.timestamp)).toEqual([
+      "2026-10-17T12:00:00.000Z", "2026-10-17T11:30:00.000Z", "2026-10-17T11:00:00.000Z",
+    ]);
+  });
+
+  it("count_errors counts back from until, for both sources", async () => {
+    for (const src of ["app", "edge"]) {
+      const { call, requests } = await connect(windowed);
+      const result = await call("count_errors", { app: "shop", hours: 2, until: "2026-10-18T08:00:00+02:00", source: src });
+      expect(result.isError).toBe(false);
+      expect(result.json()).toMatchObject({ from: "2026-10-18T04:00:00.000Z", until: "2026-10-18T06:00:00.000Z" });
+      const range = rangeOf(requests);
+      expect(range.get("start")).toBe(String(ns("2026-10-18T04:00:00Z")));
+      expect(range.get("end")).toBe(String(ns("2026-10-18T06:00:00Z")));
+    }
+  });
+
+  it("query_logs with source edge counts back from until", async () => {
+    const { call, requests } = await connect(windowed);
+    const result = await call("query_logs", { app: "shop", hours: 168, until: "2026-10-18T00:00:00.000Z", source: "edge" });
+    expect(result.json()).toMatchObject({ from: "2026-10-11T00:00:00.000Z", until: "2026-10-18T00:00:00.000Z" });
+    const range = rangeOf(requests);
+    expect(BigInt(range.get("end")!) - BigInt(range.get("start")!)).toBe(168n * HOUR_NS);
+  });
+
+  it("without until, the window ends now and is echoed", async () => {
+    const { call, requests } = await connect(windowed);
+    const body = (await call("query_logs", { app: "shop", hours: 1 })).json();
+    expect(body).toMatchObject({ from: "2026-10-18T11:00:00.000Z", until: "2026-10-18T12:00:00.000Z", returned: 3 });
+    expect(rangeOf(requests).get("end")).toBe(String(BigInt(NOW) * 1_000_000n));
+  });
+
+  it("accepts an until up to a minute ahead of the server clock", async () => {
+    const { call } = await connect(windowed);
+    const result = await call("count_errors", { app: "shop", until: "2026-10-18T12:01:00Z" });
+    expect(result.isError).toBe(false);
+    expect(result.json()).toMatchObject({ until: "2026-10-18T12:01:00.000Z" });
+  });
+
+  it.each([
+    ["yesterday", /ISO 8601 timestamp with a time zone, e\.g\. "2026-10-18T12:00:00Z"/],
+    ["2026-10-18", /ISO 8601/],
+    ["2026-10-18T12:00:00", /ISO 8601/],
+    ["2026-13-01T00:00:00Z", /ISO 8601/],
+    ["Sun, 18 Oct 2026 12:00:00 GMT", /ISO 8601/],
+    ["2026-10-18T12:01:01Z", /not be more than a minute in the future/],
+  ])("refuses until %j at both tools before asking Loki", async (until, message) => {
+    const { call, requests } = await connect(windowed);
+    for (const tool of ["query_logs", "count_errors"]) {
+      const result = await call(tool, { app: "shop", until });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(message);
+    }
+    expect(requests).toHaveLength(0);
   });
 });
 
