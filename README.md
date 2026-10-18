@@ -71,8 +71,8 @@ An app with only some of this answers the tools it is ready for and is refused a
 | Tool | Returns |
 | --- | --- |
 | `ping(app)` | `{app, client, apps, scope}`: proves auth and routing; `apps` lists the registered apps, `scope` the apps this client may read or `"*"`. |
-| `query_logs(app, hours=24, level?, action?, limit=100, source="app")` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. `source: "edge"` reads the app's Edge Services access log; `action` is then `<METHOD> <path>`. See [Log tools](#log-tools) and [Edge access logs](#edge-access-logs). |
-| `count_errors(app, hours=24, source="app")` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. With `source: "edge"` the rows are `{status, action, count}`: origin status and `<METHOD> <path>`. |
+| `query_logs(app, hours=24, level?, action?, limit=100, source="app")` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. `source: "edge"` reads the app's Edge Services access log; `action` is then `<METHOD> <path>` and `level` may also be `"waf"` (requests the WAF marked block). See [Log tools](#log-tools) and [Edge access logs](#edge-access-logs). |
+| `count_errors(app, hours=24, source="app")` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. With `source: "edge"` the rows are `{status, action, count}`: origin status and `<METHOD> <path>`; only 5xx lines count, WAF hits do not. |
 | `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Loaded at startup from `schemas/<app>.redacted-schema.md`. |
 | `query_sql(app, sql, limit?)` | `{columns, rows, truncated}` for one `SELECT` (or `WITH ... SELECT`) over the app's redacted views. See [SQL tools](#sql-tools). |
 
@@ -112,13 +112,18 @@ Every line Loki returns goes through `redactLine` with the app's schema before i
 `source: "edge"` (D46) reads an app's Scaleway Edge Services access log from the stream its `apps.json` entry names under `edge.stream`. Edge lines are plain JSON records without the app envelope (`http_request_method`, `http_client_request_url`, `http_response_code_client`, `http_response_code_origin`, `http_client_country_code`, `waf_action`, `waf_mode`, …), so one `| json` extracts them. For `query_logs("shop", 24, level: "error", action: "GET /api/sync", source: "edge")`:
 
 ```logql
-{resource_name="shop-prod-es"} | json | waf_action != "pass" or http_response_code_origin >= 500 | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""
+{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""
 ```
 
-- `level`: the lines' own `level` is always `info`, so `error` means the origin answered 5xx or the WAF did not pass the request; `info` is the rest. `__error__=""` drops a line whose origin status is not a number rather than failing the count.
+- `level`: the lines' own `level` is always `info`, so the server derives one of three, which partition the lines:
+  - `error`: the origin or the client status is 500 or above.
+  - `waf`: `waf_action` is `block` and neither status is 5xx. In `log_only` mode this is a request the WAF would have blocked; the origin still answered it. WAF hits are kept apart from errors because a `log_only` WAF marks many requests the origin served normally (in one deployment about 4% of requests over 7 days).
+  - `info`: the rest, including a `waf_action` of `-` or none and a status 0 (the client aborted).
+
+  `__error__=""` drops a line whose status is not a number rather than failing the count.
 - `action`: an edge line has none, so the server derives `<METHOD> <path>` from the raw line: the URL path without query or fragment, scrubbed as free text so personal data in a path cannot get around the schema. The `action` filter takes the same form.
 - Redaction: every line goes through `redactLine` with [`schemas/edge.hyde-json.json`](schemas/edge.hyde-json.json), committed here because no app writes these lines: the client IP and Scaleway's `pipeline_id` and `project_id` are hidden, the URL is `text` (its query string becomes `?[query]`), every other field is visible. `payload` is the whole redacted line. The server does not start without the file.
-- `count_errors` groups by origin status and `<METHOD> <path>`.
+- `count_errors` counts `level` `error` lines only, grouped by origin status and `<METHOD> <path>`. For WAF hits use `query_logs` with `level: "waf"`.
 - An app without `edge` in `apps.json` answers `<app> has no edge source` at both tools, before Loki is asked. The app's own log schema is not needed for its edge source.
 
 ## SQL tools
