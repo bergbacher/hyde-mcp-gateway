@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { logSources } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
 import { toolNames, type ServerOptions } from "../src/mcp/server.ts";
 import { loadRedactedSchemas, loadSchemas } from "../src/schemas.ts";
+import { buildLogSources } from "../src/sources/index.ts";
 import { answering, connectInMemory, REGISTRY, textOf, untouchable } from "./helpers.ts";
 
 describe("describe_schema", () => {
@@ -128,9 +128,10 @@ describe("app scope at the SQL tools (D39)", () => {
 describe("registration", () => {
   const sql = { databases: untouchable, schemas: new Map() };
   const logs = {
-    schemas: loadSchemas(REGISTRY, fileURLToPath(new URL("./fixtures/schemas/", import.meta.url))),
+    sources: buildLogSources({
+      registry: REGISTRY, schemas: loadSchemas(REGISTRY, fileURLToPath(new URL("./fixtures/schemas/", import.meta.url))), env: {},
+    }),
     loki: createLoki({ url: "https://loki.invalid", token: "t", fetch: () => Promise.reject(new Error("reached Loki")) }),
-    sources: logSources(REGISTRY),
   };
   const cases: [string, Omit<ServerOptions, "registry">, string[]][] = [
     ["no options", {}, ["ping"]],

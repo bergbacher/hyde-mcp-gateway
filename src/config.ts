@@ -1,16 +1,17 @@
 // Configuration from the environment. Client tokens are `HYDE_TOKEN_<CLIENT>`,
 // one per client (D16); the client name is the suffix, lower-cased. Each token
 // needs its app scope in `HYDE_TOKEN_<CLIENT>_APPS` (D39, src/mcp/auth.ts),
-// checked against the registry. Each registered app (src/registry.ts, D38) reads its secrets under
-// `HYDE_APP_<NAME>_`: `REDACTED_URL` for its redacted database and
-// `DATABASE_CA` for TLS (src/db/connection.ts); `CERT_NAME` and `LOKI_STREAM`
-// override the registry's values. Each app's URL is optional: an app without
-// one answers its database tools that it is not configured (D37). In
-// production an app with a URL needs `ssl=true` and its CA.
+// checked against the registry. Each registered app (src/registry.ts, D38)
+// reads its secrets under `HYDE_APP_<NAME>_`: `REDACTED_URL` for its redacted
+// database and `DATABASE_CA` for TLS (src/db/connection.ts); `CERT_NAME`
+// overrides the registry's value (`LOKI_STREAM` is read by the log sources,
+// src/sources/). Each app's URL is optional: an app without one answers its
+// database tools that it is not configured (D37). In production an app with a
+// URL needs `ssl=true` and its CA.
 
 import { resolveDatabase, type DatabaseConfig } from "./db/connection.ts";
 import { readClientTokens, type Principal } from "./mcp/auth.ts";
-import { appVariables, STREAM_SELECTOR, type App, type Registry } from "./registry.ts";
+import { appVariables, type App, type Registry } from "./registry.ts";
 
 export interface Config {
   port: number;
@@ -47,36 +48,17 @@ function readDatabases(registry: Registry, env: NodeJS.ProcessEnv): Map<App, Dat
 }
 
 // Loki (D14, D20): the Cockpit logs data source and its `read_only_logs` token.
-// The apps share the data source (A10); an app's lines are selected by its
-// stream selector, then by the `service` field its log() writes.
-
-/** Where one app's lines are: its stream selector and its `service` value, and its edge stream when it has one (D46). */
-export interface LogSource {
-  stream: string;
-  service: string;
-  /** The stream selector of the app's Edge Services access logs; absent when the registry declares no `edge`. */
-  edgeStream?: string;
-}
+// The apps share the data source (A10); which stream each app's sources read
+// is the log sources module's (src/sources/index.ts).
 
 export interface LokiConfig {
   /** Data source URL without trailing slash, e.g. `https://<id>.logs.cockpit.fr-par.scw.cloud`. */
   url: string;
   token: string;
-  /** app → stream selector and service, for every registered app */
-  sources: ReadonlyMap<App, LogSource>;
 }
 
-/** The registry's stream and service per app, without overrides. */
-export function logSources(registry: Registry): Map<App, LogSource> {
-  return new Map([...registry.apps.values()].map((e) => [e.name, {
-    stream: e.loki.stream,
-    service: e.loki.service,
-    ...(e.edge ? { edgeStream: e.edge.stream } : {}),
-  }]));
-}
-
-/** Reads `COCKPIT_LOGS_URL`, `COCKPIT_LOGS_READ_TOKEN` and each app's `LOKI_STREAM` override. Throws naming each problem. */
-export function readLokiConfig(registry: Registry, env: NodeJS.ProcessEnv = process.env): LokiConfig {
+/** Reads `COCKPIT_LOGS_URL` and `COCKPIT_LOGS_READ_TOKEN`. Throws naming each problem. */
+export function readLokiConfig(env: NodeJS.ProcessEnv = process.env): LokiConfig {
   const problems: string[] = [];
   let url = "";
   const rawUrl = env.COCKPIT_LOGS_URL;
@@ -85,14 +67,6 @@ export function readLokiConfig(registry: Registry, env: NodeJS.ProcessEnv = proc
   else url = rawUrl.replace(/\/+$/, "");
   const token = env.COCKPIT_LOGS_READ_TOKEN ?? "";
   if (!token) problems.push("COCKPIT_LOGS_READ_TOKEN is not set");
-  const sources = logSources(registry);
-  for (const [app, source] of sources) {
-    const key = appVariables(app).lokiStream;
-    const override = env[key]?.trim();
-    if (!override) continue;
-    if (!STREAM_SELECTOR.test(override)) problems.push(`${key} is not a LogQL stream selector ({label="value", …})`);
-    source.stream = override;
-  }
   if (problems.length > 0) throw new Error(`Loki not configured: ${problems.join("; ")}`);
-  return { url, token, sources };
+  return { url, token };
 }
