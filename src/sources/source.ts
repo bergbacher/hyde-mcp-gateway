@@ -1,22 +1,26 @@
 // What one log source is (D51): an implementation that owns its stream, its
 // schema, its LogQL, how a Loki entry becomes a returned line, how count_errors
 // groups its lines, its action grammar and its error wording. The log tools
-// (src/mcp/logs.ts) know only LogReader; a new source is one SourceKind here
-// plus one registry field.
+// (src/mcp/logs.ts) know only LogReader; a new source is one SourceKind
+// implementation (like app.ts, edge.ts) listed in KINDS (index.ts), plus one
+// registry field.
 
 import type { Json, LogSchema } from "hyde-json";
 import type { LokiEntry } from "../loki.ts";
 import type { AppEntry } from "../registry.ts";
 import type { Schemas } from "../schemas.ts";
 
+/** The levels the tools filter by. */
 export type Level = "error" | "info";
 
+/** What query_logs and count_errors narrow a source's lines by. */
 export interface LogFilter {
   level?: Level;
   /** Unchecked: the reader refuses an action outside its source's grammar. */
   action?: string;
 }
 
+/** One returned line: the redacted payload and the action and level read or derived from it. */
 export interface LogLine {
   timestamp: string;
   action: Json;
@@ -47,6 +51,7 @@ export type BuiltSource =
   | { stream: string | null; reader: LogReader; missing?: undefined }
   | { stream: string | null; reader?: undefined; missing: string[] };
 
+/** One kind of log source; `build` makes its reader for one app. */
 export interface SourceKind<Name extends string = string> {
   /** The value of the tools' `source` parameter. */
   name: Name;
@@ -63,10 +68,12 @@ export function quote(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
 
+/** A Loki entry's nanosecond timestamp as ISO 8601. */
 export function timestampOf(entry: LokiEntry): string {
   return new Date(Number(BigInt(entry.ns) / 1_000_000n)).toISOString();
 }
 
+/** A JSON object, not an array or null. */
 export function isObject(value: Json): value is { [key: string]: Json } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

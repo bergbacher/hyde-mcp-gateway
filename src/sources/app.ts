@@ -13,6 +13,7 @@ import { isObject, quote, timestampOf, type LogFilter, type LogLine, type LogRea
 /** An app line's `action`. */
 export const APP_ACTION = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/;
 
+/** The app-line source kind. */
 export const appSource: SourceKind<"app"> = {
   name: "app",
   group: "logs",

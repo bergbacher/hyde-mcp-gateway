@@ -1,12 +1,13 @@
 // Configuration from the environment. Client tokens are `HYDE_TOKEN_<CLIENT>`,
 // one per client (D16); the client name is the suffix, lower-cased. Each token
 // needs its app scope in `HYDE_TOKEN_<CLIENT>_APPS` (D39, src/mcp/auth.ts),
-// checked against the registry. Each registered app (src/registry.ts, D38) reads its secrets under
-// `HYDE_APP_<NAME>_`: `REDACTED_URL` for its redacted database and
-// `DATABASE_CA` for TLS (src/db/connection.ts); `CERT_NAME` overrides the
-// registry's value (`LOKI_STREAM` is read by the log sources, src/sources/). Each app's URL is optional: an app without
-// one answers its database tools that it is not configured (D37). In
-// production an app with a URL needs `ssl=true` and its CA.
+// checked against the registry. Each registered app (src/registry.ts, D38)
+// reads its secrets under `HYDE_APP_<NAME>_`: `REDACTED_URL` for its redacted
+// database and `DATABASE_CA` for TLS (src/db/connection.ts); `CERT_NAME`
+// overrides the registry's value (`LOKI_STREAM` is read by the log sources,
+// src/sources/). Each app's URL is optional: an app without one answers its
+// database tools that it is not configured (D37). In production an app with a
+// URL needs `ssl=true` and its CA.
 
 import { resolveDatabase, type DatabaseConfig } from "./db/connection.ts";
 import { readClientTokens, type Principal } from "./mcp/auth.ts";

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseSchema } from "hyde-json";
+import { parseSchema, scrubText } from "hyde-json";
 import { buildLogSources, type LogReader } from "../src/sources/index.ts";
 import { loadEdgeSchema } from "../src/schemas.ts";
 import { REGISTRY } from "./helpers.ts";
@@ -12,10 +12,10 @@ const EDGE_SCHEMA = loadEdgeSchema();
 
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const crmSchema = parseSchema({ app: "crm", fields: { action: "visible", level: "visible", message: "text" } });
-const SOURCES = buildLogSources({ registry: REGISTRY, schemas: new Map([["crm", crmSchema]]), edgeSchema: EDGE_SCHEMA, env: {} });
+const BUILT = buildLogSources({ registry: REGISTRY, schemas: new Map([["crm", crmSchema]]), edgeSchema: EDGE_SCHEMA, env: {} });
 
 function readerOf(app: string, source: "app" | "edge"): LogReader {
-  const reader = SOURCES.reader(app, source);
+  const reader = BUILT.reader(app, source);
   if ("missing" in reader) throw new Error(`not configured: ${reader.missing.join("; ")}`);
   return reader;
 }
@@ -49,13 +49,13 @@ describe("app source", () => {
   });
 
   it("is missing without the app's schema (D37)", () => {
-    expect(SOURCES.reader("shop", "app")).toEqual({ missing: ["schemas/shop.hyde-json.json is missing"] });
-    expect(SOURCES.missing("shop", "app")).toEqual(["schemas/shop.hyde-json.json is missing"]);
-    expect(SOURCES.missing("crm", "app")).toEqual([]);
+    expect(BUILT.reader("shop", "app")).toEqual({ missing: ["schemas/shop.hyde-json.json is missing"] });
+    expect(BUILT.missing("shop", "app")).toEqual(["schemas/shop.hyde-json.json is missing"]);
+    expect(BUILT.missing("crm", "app")).toEqual([]);
   });
 
   it("reads the stream from apps.json unless HYDE_APP_<NAME>_LOKI_STREAM overrides it; refuses an invalid override", () => {
-    expect(SOURCES.streams("crm")).toEqual({ app: REGISTRY.apps.get("crm")!.loki.stream });
+    expect(BUILT.streams("crm")).toEqual({ app: REGISTRY.apps.get("crm")!.loki.stream });
     const custom = buildLogSources({ registry: REGISTRY, schemas: new Map(), env: { HYDE_APP_CRM_LOKI_STREAM: '{resource_name="x-crm"}' } });
     expect(custom.streams("crm")).toEqual({ app: '{resource_name="x-crm"}' });
     expect(() => buildLogSources({ registry: REGISTRY, schemas: new Map(), env: { HYDE_APP_SHOP_LOKI_STREAM: '{a="b"} | json' } }))
@@ -70,16 +70,16 @@ describe("edge source (D46)", () => {
   const SHOP_EDGE = '{resource_name="shop-prod-es"}';
 
   it("is missing for an app without edge in apps.json, and without the edge schema (D53)", () => {
-    expect(SOURCES.reader("crm", "edge")).toEqual({ missing: ["no edge stream in apps.json"] });
+    expect(BUILT.reader("crm", "edge")).toEqual({ missing: ["no edge stream in apps.json"] });
     const noSchema = buildLogSources({ registry: REGISTRY, schemas: new Map(), env: {} });
     expect(noSchema.missing("shop", "edge")).toEqual(["schemas/edge.hyde-json.json is missing"]);
     expect(noSchema.missing("crm", "edge")).toEqual(["no edge stream in apps.json", "schemas/edge.hyde-json.json is missing"]);
-    expect(SOURCES.missing("shop", "edge")).toEqual([]);
+    expect(BUILT.missing("shop", "edge")).toEqual([]);
   });
 
   it("does not need the app's own log schema", () => {
-    expect(SOURCES.missing("shop", "app")).not.toEqual([]);
-    expect("query" in SOURCES.reader("shop", "edge")).toBe(true);
+    expect(BUILT.missing("shop", "app")).not.toEqual([]);
+    expect("query" in BUILT.reader("shop", "edge")).toBe(true);
   });
 
   it("builds the LogQL: one json stage, error = origin 5xx or not passed by the WAF, action = method and path", () => {
@@ -95,7 +95,7 @@ describe("edge source (D46)", () => {
       logql: '{resource_name="shop-prod-es"} | json | http_request_method="GET"'
         + ' | http_client_request_url=~"(https?://[^/?#]+)?/api/sync/outbox\\\\.json([?#].*)?" | __error__=""',
     });
-    expect(SOURCES.streams("shop")).toEqual({ app: REGISTRY.apps.get("shop")!.loki.stream, edge: SHOP_EDGE });
+    expect(BUILT.streams("shop")).toEqual({ app: REGISTRY.apps.get("shop")!.loki.stream, edge: SHOP_EDGE });
   });
 
   it("refuses an action outside its grammar", () => {
@@ -155,6 +155,55 @@ describe("edge source (D46)", () => {
     });
   });
 
+  it("derives from the redacted line what the raw-line derivation it replaces derived (D52)", () => {
+    // The derivation before D52, verbatim in substance: parse the raw line, cut the path, scrub only the path.
+    function fromRaw(raw: string) {
+      const line = JSON.parse(raw) as Record<string, unknown>;
+      const method = typeof line.http_request_method === "string" && /^[A-Z]{1,10}$/.test(line.http_request_method)
+        ? line.http_request_method : null;
+      let path: string | null = null;
+      if (typeof line.http_client_request_url === "string") {
+        const url = line.http_client_request_url;
+        const p = /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*)?([^?#]*)/.exec(url)![1]!;
+        path = p === "" ? (url.includes("://") ? "/" : null) : p.startsWith("/") ? p : null;
+      }
+      const origin = line.http_response_code_origin;
+      const status = typeof origin === "number" || (typeof origin === "string" && /^\d+$/.test(origin)) ? Number(origin) : null;
+      const level = line.waf_action !== "pass" || (status !== null && status >= 500) ? "error" : "info";
+      return { action: method && path ? `${method} ${scrubText(path)}` : null, level, status };
+    }
+    const reader = readerOf("shop", "edge");
+    const urls = [
+      "https://shop.example.invalid/api/sync/outbox/pending?token=abc",
+      "https://shop.example.invalid/api/a?x=1#frag",
+      "https://user@shop.example.invalid/api/a",
+      "/api/a?email=jane.doe@example.com",
+      "https://shop.example.invalid",
+      "https://shop.example.invalid/api/members/jane.doe@example.com/0171 2345678",
+      "https://shop.example.invalid/w/ws7f3a9b2c4d5e6f7a8b9c0d1e2f3/x",
+      "https://shop.example.invalid/de/DE89 3704 0044 0532 0130 00",
+      "relative/path",
+    ];
+    const patches = [{}, { http_response_code_origin: 502 }, { http_response_code_origin: "500" }, { waf_action: "block" }];
+    for (const url of urls) {
+      for (const patch of patches) {
+        const entry = edgeEntry({ ...patch, http_client_request_url: url });
+        const expected = fromRaw(entry.line);
+        expect(reader.line(entry), url).toMatchObject({ action: expected.action, level: expected.level });
+        expect(reader.group(entry).row, url).toEqual({ status: expected.status, action: expected.action ?? "[none]" });
+      }
+    }
+  });
+
+  it("relies on the edge schema declaring method, origin status and WAF verdict visible and the URL text", () => {
+    expect(EDGE_SCHEMA.fields).toMatchObject({
+      http_request_method: "visible",
+      http_response_code_origin: "visible",
+      waf_action: "visible",
+      http_client_request_url: "text",
+    });
+  });
+
   it("derives the path without query or fragment, scrubbed as free text", () => {
     const action = (url: unknown, method: unknown = "POST") =>
       readerOf("shop", "edge").line(edgeEntry({ http_client_request_url: url, http_request_method: method })).action;
@@ -172,7 +221,7 @@ describe("edge source (D46)", () => {
 
 describe("startup view", () => {
   it("lists per app the sources apps.json declares, under their group, with what each lacks", () => {
-    expect(SOURCES.groups("shop")).toEqual({ logs: ["schemas/shop.hyde-json.json is missing"], edge: [] });
-    expect(SOURCES.groups("crm")).toEqual({ logs: [] });
+    expect(BUILT.groups("shop")).toEqual({ logs: ["schemas/shop.hyde-json.json is missing"], edge: [] });
+    expect(BUILT.groups("crm")).toEqual({ logs: [] });
   });
 });

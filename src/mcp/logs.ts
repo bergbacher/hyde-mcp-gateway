@@ -8,10 +8,11 @@
 // before Loki is asked (D37, D53).
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Json } from "hyde-json";
 import { z } from "zod";
 import { LokiError, nsOf, type Loki } from "../loki.ts";
-import { KINDS, SOURCES, type LogSources } from "../sources/index.ts";
+import { KINDS, SOURCES, type LogFilter, type LogReader, type LogSources, type Source } from "../sources/index.ts";
 import { appSchema, error, forApp, notConfigured, text, type Gate } from "./server.ts";
 
 export const MAX_HOURS = 168;
@@ -48,6 +49,15 @@ export function registerLogTools(server: McpServer, gate: Gate, { sources, loki,
     return { start: nsOf(end - h * 3_600_000), end: nsOf(end) };
   }
 
+  /** The reader of `app`'s `src` and its LogQL for `filter`, or the tool error that refuses them before Loki is asked. */
+  function open(app: string, src: Source, filter: LogFilter): { reader: LogReader; query: { logql: string } } | { refused: CallToolResult } {
+    const reader = sources.reader(app, src);
+    if ("missing" in reader) return { refused: notConfigured(app, reader.missing) };
+    const query = reader.query(filter);
+    if ("refused" in query) return { refused: error(query.refused) };
+    return { reader, query };
+  }
+
   server.registerTool(
     "query_logs",
     {
@@ -68,10 +78,9 @@ export function registerLogTools(server: McpServer, gate: Gate, { sources, loki,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     forApp(gate, async ({ app, hours: h, level, action, limit, source: src }) => {
-      const reader = sources.reader(app, src);
-      if ("missing" in reader) return notConfigured(app, reader.missing);
-      const query = reader.query({ level, action });
-      if ("refused" in query) return error(query.refused);
+      const opened = open(app, src, { level, action });
+      if ("refused" in opened) return opened.refused;
+      const { reader, query } = opened;
       return guard(async () => {
         const { start, end } = window(h);
         const [entries, matched] = await Promise.all([
@@ -94,10 +103,9 @@ export function registerLogTools(server: McpServer, gate: Gate, { sources, loki,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     forApp(gate, async ({ app, hours: h, source: src }) => {
-      const reader = sources.reader(app, src);
-      if ("missing" in reader) return notConfigured(app, reader.missing);
-      const query = reader.query({ level: "error" });
-      if ("refused" in query) return error(query.refused);
+      const opened = open(app, src, { level: "error" });
+      if ("refused" in opened) return opened.refused;
+      const { reader, query } = opened;
       return guard(async () => {
         const entries = await loki.queryRange(query.logql, { ...window(h), limit: ERROR_SCAN_LIMIT });
         const groups = new Map<string, { row: Record<string, Json>; count: number }>();

@@ -12,9 +12,12 @@ export type { Level, LogFilter, LogLine, LogReader } from "./source.ts";
 
 /** Every source kind; the first is the tools' default. */
 export const KINDS = [appSource, edgeSource] as const;
+/** A value of the tools' `source` parameter. */
 export type Source = (typeof KINDS)[number]["name"];
+/** Every `source` value, the default first. */
 export const SOURCES = KINDS.map((k) => k.name) as [Source, ...Source[]];
 
+/** The log sources of every registered app, built once (buildLogSources). */
 export interface LogSources {
   /** The reader of `app`'s `source`, or what it lacks. */
   reader(app: App, source: Source): LogReader | { missing: string[] };

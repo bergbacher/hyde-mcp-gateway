@@ -17,6 +17,7 @@ import { isObject, quote, timestampOf, type Level, type LogFilter, type LogLine,
 /** An edge line's `action`: `<METHOD> <path>`, the path without query. */
 export const EDGE_ACTION = /^([A-Z]{3,7}) (\/[A-Za-z0-9_.~%:@+\/-]{0,200})$/;
 
+/** The Edge Services access-log source kind. */
 export const edgeSource: SourceKind<"edge"> = {
   name: "edge",
   group: "edge",
@@ -41,9 +42,9 @@ export const edgeSource: SourceKind<"edge"> = {
 function edgeReader(stream: string, schema: LogSchema): LogReader {
   return {
     query: (filter) => edgeQuery(stream, filter),
-    line: (entry) => toEdgeLine(entry, schema),
+    line: (entry) => toEdgeLine(entry, schema).line,
     group(entry) {
-      const { action, status } = edgeFields(redactLine(entry.line, schema).line);
+      const { action, status } = toEdgeLine(entry, schema);
       const row = { status, action: action ?? "[none]" };
       return { key: `${status ?? "-"} ${row.action}`, row };
     },
@@ -76,11 +77,11 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** One entry, redacted by the edge schema; `payload` is the whole redacted line. */
-function toEdgeLine(entry: LokiEntry, schema: LogSchema): LogLine {
+/** One entry, redacted by the edge schema; `payload` is the whole redacted line, `status` its origin status. */
+function toEdgeLine(entry: LokiEntry, schema: LogSchema): { line: LogLine; action: string | null; status: number | null } {
   const { line } = redactLine(entry.line, schema);
-  const { action, level } = edgeFields(line);
-  return { timestamp: timestampOf(entry), action, level, payload: line };
+  const { action, level, status } = edgeFields(line);
+  return { line: { timestamp: timestampOf(entry), action, level, payload: line }, action, status };
 }
 
 /**
