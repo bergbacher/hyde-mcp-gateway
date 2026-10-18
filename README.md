@@ -1,6 +1,6 @@
 # hyde-mcp-gateway
 
-Agents read the production logs and databases of shop and crm without seeing personal data. The database side is hyde-db; the log side applies the same principle, a declared field allowlist per app, inside this server. Product records: [`LEDGER.md`](LEDGER.md).
+Agents read the production logs and databases of your organisation's apps without seeing personal data. The database side is hyde-db; the log side applies the same principle, a declared field allowlist per app, inside this server. The apps are configuration: [`apps.json`](apps.json) registers them (LEDGER D38), today shop and crm. Product records: [`LEDGER.md`](LEDGER.md).
 
 ## Run locally
 
@@ -14,29 +14,55 @@ COCKPIT_LOGS_READ_TOKEN=<read_only_logs token> \
 pnpm dev
 ```
 
-Both fetch scripts take `--app shop` or `--app crm` (repeatable) to fetch only those apps, and `--strict` to fail when any requested app is missing. The server refuses to start only when `schemas/` holds no log field schema at all, or a present one is invalid (see [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md)).
+Both fetch scripts take `--app <name>` (repeatable, any app in `apps.json`) to fetch only those apps, and `--strict` to fail when any requested app is missing. The server refuses to start only when `schemas/` holds no log field schema at all, or a present one is invalid (see [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md)).
 
 ### Per-app readiness
 
-The server starts with the apps whose files are present (LEDGER D37). An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `<APP>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. The startup line lists under `apps` what each app answers (`logs`, `sql`) and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `SHOP_*` database variables. The image needs at least one app with both schema files.
+The server starts with every app in `apps.json` and computes, per app, what it can answer from the registry, the environment and the schema files present (LEDGER D37). An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. The startup line lists under `apps` what each app answers (`logs`, `sql`) and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables. The image needs at least one app with both schema files.
 
 The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters). `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
 Client setup, issuing and rotating client tokens, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
 
+## Adding an app
+
+An app is one `apps.json` entry, its secrets in `apply.env`, and a re-apply. No code changes (LEDGER D38).
+
+1. **Registry entry.** Add the app under `apps` in [`apps.json`](apps.json). The name matches `^[a-z][a-z0-9-]*$`; upper-cased with `-` → `_` it is the infix of the app's variables (`help-desk` → `HYDE_APP_HELP_DESK_`). Every field is required, and the server, the scripts and `infra/` refuse an invalid file naming each problem:
+
+   | Field | Holds |
+   | --- | --- |
+   | `repo` | The app's GitHub repo, `<owner>/<repo>`. |
+   | `logSchemaPath` | Its log field schema in that repo, e.g. `prisma/hyde-json.json` ([Log field schemas](#log-field-schemas)). |
+   | `redactedSchemaPath` | hyde-db's `redacted-schema.md` in that repo. |
+   | `redactedSqlPath` | The directory holding hyde-db's `redacted-views.sql` and `redacted-views-drop.sql`. |
+   | `loki.stream` | The LogQL stream selector of the app's container, `{resource_name="<container resource name>"}`. |
+   | `loki.service` | The `service` field the app's `log()` writes. |
+   | `database.host`, `database.port` | The RDB endpoint's DNS name (not an address) and port. |
+   | `database.sourceDatabase` | The database the hyde-db views read from. |
+   | `database.certName` | The name the instance certificate carries, checked instead of the host (the bare instance id, or the endpoint host when the certificate names it). |
+   | `database.caSource` | `{repo, path, ref}` of the file holding the instance CA's PEM block, e.g. the app's `lib/database-ca.ts`. |
+
+2. **Schemas.** `pnpm schemas --app <name>` and `pnpm fetch:redacted-schemas --app <name>` fetch its two schema files; the deploy workflow fetches every registered app's. `APP_REPOS_READ_TOKEN` needs Contents: read on the new repo.
+3. **Reader.** `bash scripts/wizard/fetch-redacted-sql.sh --app <name>`, then `bash scripts/wizard/redacted-reader.sh --app <name>` ([runbook](docs/runbooks/redacted-reader.md)). It writes `HYDE_APP_<NAME>_REDACTED_URL` to `apply.env`.
+4. **Secrets.** Put the instance CA in `HYDE_APP_<NAME>_DATABASE_CA` in `apply.env` (the `ca.pem` the fetch script wrote). `infra/` derives both variables from `apps.json`; nothing is listed by hand.
+5. **Re-apply.** `pnpm infra:apply`, then `pnpm infra:diff`. The next deploy builds an image with the new app's schemas.
+
+An app with only some of this answers the tools it is ready for and is refused at the others ([Per-app readiness](#per-app-readiness)).
+
 ## Tools
 
-`app` is `"shop"` or `"crm"` on every tool.
+`app` is the name of an app in `apps.json` on every tool; any other name is a tool error naming the registered apps.
 
 | Tool | Returns |
 | --- | --- |
-| `ping(app)` | `{app, client}`: proves auth and routing. |
+| `ping(app)` | `{app, client, apps}`: proves auth and routing; `apps` lists the registered apps. |
 | `query_logs(app, hours=24, level?, action?, limit=100)` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. See [Log tools](#log-tools). |
 | `count_errors(app, hours=24)` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. |
 | `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Loaded at startup from `schemas/<app>.redacted-schema.md`. |
 | `query_sql(app, sql, limit?)` | `{columns, rows, truncated}` for one `SELECT` (or `WITH ... SELECT`) over the app's redacted views. See [SQL tools](#sql-tools). |
 
-`createServer(client, options)` always registers `ping`, the log tools when `options.logs` is given (log schemas, Loki client, stream selectors), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options = {})` passes `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
+`createServer(client, options)` takes the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (log schemas, Loki client, each app's log source), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options)` passes `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
 
 ## Environment
 
@@ -46,11 +72,13 @@ Client setup, issuing and rotating client tokens, and a first analysis: [`docs/r
 | `PORT` | Listen port, default 8080. |
 | `COCKPIT_LOGS_URL` | The Cockpit logs data source, `https://<id>.logs.cockpit.fr-par.scw.cloud`. Required. |
 | `COCKPIT_LOGS_READ_TOKEN` | Cockpit token with the `read_only_logs` scope (D20), sent as `X-Token`. Required. |
-| `LOKI_STREAM_SHOP`, `LOKI_STREAM_CRM` | LogQL stream selector of the app's container. Default `{resource_name="example-<app>-prod"}`. |
-| `CRM_REDACTED_URL`, `SHOP_REDACTED_URL` | The redacted reader's connection string, `mysql://<user>:<password>@<host>:3306/redacted?ssl=true`. The only parameter is `ssl`; the database is always `redacted`. |
-| `CRM_DATABASE_CA`, `SHOP_DATABASE_CA` | The RDB instance's CA certificate, PEM text (`scw rdb instance get-certificate`). Required with `ssl=true`. |
-| `CRM_DATABASE_CERT_NAME`, `SHOP_DATABASE_CERT_NAME` | The name the instance certificate carries, the bare instance id. Required with `ssl=true`. |
-| `NODE_ENV` | `production` requires, for every app whose URL is set, `ssl=true`, CA and certificate name, or the server does not start. An app without a URL is not configured for SQL (D37). |
+| `HYDE_APP_<NAME>_REDACTED_URL` | The app's redacted reader connection string, `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true`. The only parameter is `ssl`; the database is always `redacted`. Unset, the app is not configured for SQL (D37). |
+| `HYDE_APP_<NAME>_DATABASE_CA` | The app's RDB instance CA certificate, PEM text (`scw rdb instance get-certificate`). Required with `ssl=true`. |
+| `HYDE_APP_<NAME>_CERT_NAME` | Optional: overrides `database.certName` from `apps.json`, the name the instance certificate must carry. |
+| `HYDE_APP_<NAME>_LOKI_STREAM` | Optional: overrides `loki.stream` from `apps.json`, the LogQL stream selector of the app's container. |
+| `NODE_ENV` | `production` requires, for every app whose URL is set, `ssl=true` and its CA, or the server does not start. |
+
+`<NAME>` is the app's name in `apps.json` upper-cased, `-` → `_`: `HYDE_APP_SHOP_REDACTED_URL`. A variable of an app `apps.json` does not register is ignored. The two overrides are for local runs and incidents; in production change `apps.json`, which `infra/` does not declare them for.
 
 ## Log tools
 
@@ -60,7 +88,7 @@ The server builds the LogQL; clients pass only parameters, so neither the token'
 {resource_name="example-crm-prod"} | json | line_format "{{.message}}" | json | service="crm" | level="error" | action="send-mail"
 ```
 
-Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the first `| json` opens the envelope, `line_format` makes the app line the log line, and the second `| json` extracts its fields (crm docs/operations.md). `service` is what each app's `log()` writes (`crm`, `shop`), so a broad stream selector still returns only that app's lines. `matched` comes from `sum(count_over_time(<query> [<hours>]))`.
+The stream selector and `service` value are the app's `loki` entry in `apps.json`. Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the first `| json` opens the envelope, `line_format` makes the app line the log line, and the second `| json` extracts its fields (crm docs/operations.md). `service` is what each app's `log()` writes (`crm`, `shop`), so a broad stream selector still returns only that app's lines. `matched` comes from `sum(count_over_time(<query> [<hours>]))`.
 
 Every line Loki returns goes through `redactLine` with the app's schema before it leaves the server. `action` and `level` are read from the redacted line, so an app's schema must declare them `visible`; `payload` is the redacted `message` field (or the scrubbed text of a line that is not JSON). Loki's stream labels, which hold raw extracted values, are never read. When Loki is unreachable or answers non-2xx, the tool error names Loki and the status, nothing else.
 
@@ -68,7 +96,7 @@ Every line Loki returns goes through `redactLine` with the app's schema before i
 
 `query_sql` connects as the redacted reader to database `redacted`, whose privileges are the boundary: hidden columns and base tables are refused by MySQL, and its error text ("Unknown column ...") comes back unchanged as a tool error. Before reaching the database the server refuses anything but a single `SELECT`: no second statement, no semicolon but one trailing, none inside a comment, no executable comment (`/*! */`). A run is bounded by a 15 s statement timeout, a row cap (`limit`, default 200, clamped to 1–1000) and a 1 MB result cap; `truncated` says a cap cut the result. Binary values come back as hex, `BIGINT` and `DECIMAL` as strings, dates as MySQL's text.
 
-TLS follows the apps' runtime: the server certificate is verified against the instance CA, and its identity is checked against `<APP>_DATABASE_CERT_NAME` rather than the host, since the instance certificate names neither the endpoint host nor its address. Without `ssl=true` (outside production) the connection is plain, for a local MySQL. An app without a URL or without its redacted schema answers `describe_schema` and `query_sql` that it is not configured ([Per-app readiness](#per-app-readiness)).
+TLS follows the apps' runtime: the server certificate is verified against the instance CA, and its identity is checked against the app's `database.certName` in `apps.json` (or `HYDE_APP_<NAME>_CERT_NAME`) rather than the host, since an instance certificate need not name the endpoint host and never its address. Without `ssl=true` (outside production) the connection is plain, for a local MySQL. An app without a URL or without its redacted schema answers `describe_schema` and `query_sql` that it is not configured ([Per-app readiness](#per-app-readiness)).
 
 ## hyde-json
 
@@ -93,9 +121,9 @@ redactLine(raw, schema); // → { envelope?, format: "json" | "text", line }
 
 ## Log field schemas
 
-Each app declares its log field schema as `prisma/hyde-json.json` in its own repo (crm, shop), next to its Prisma schema (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for `prisma/redacted/redacted-schema.md`.
+Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, today `prisma/hyde-json.json` next to the Prisma schema of crm and shop (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
 
-`schemas/` is gitignored except its README: the app repos own the files. At startup, `loadSchemas()` in [`src/schemas.ts`](src/schemas.ts) reads those present, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
+`schemas/` is gitignored except its README: the app repos own the files. At startup, `loadSchemas(registry)` in [`src/schemas.ts`](src/schemas.ts) reads those present for the registered apps, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
 
 A field an app starts logging without declaring it shows up as `[hidden]` until the app's schema declares it and `pnpm schemas` has run again.
 
@@ -128,9 +156,7 @@ pnpm test
 
 ## Database reader
 
-The server reads each app's database as `redacted_reader`, which can read only hyde-db's views. An admin creates the account and applies the views with `scripts/wizard/redacted-reader.sh`. The wizard writes `CRM_REDACTED_URL` and `SHOP_REDACTED_URL` to `apply.env`. First run, re-apply after a migration and rotation: [`docs/runbooks/redacted-reader.md`](docs/runbooks/redacted-reader.md).
-
-Tools so far: `ping(app)`. `app` is `"shop"` or `"crm"` on every tool.
+The server reads each app's database as `redacted_reader`, which can read only hyde-db's views. An admin creates the account and applies the views with `scripts/wizard/redacted-reader.sh`, which takes host, port and source database from `apps.json` and writes `HYDE_APP_<NAME>_REDACTED_URL` to `apply.env` for each app. First run, re-apply after a migration and rotation: [`docs/runbooks/redacted-reader.md`](docs/runbooks/redacted-reader.md).
 
 ## Deploy
 
@@ -147,32 +173,30 @@ Every run first checks that the `scw` credential in scope reads the committed na
 
 Gitignored, never committed, never in GitHub. `pnpm infra:apply` loads it with `node --env-file`. `apply` refuses, listing every missing required name, before it writes anything.
 
+The global keys are listed in `infra/base.yaml`. Each app's two keys are derived from `apps.json` when `infra/` is loaded, never listed by hand: `HYDE_APP_<NAME>_REDACTED_URL` and `HYDE_APP_<NAME>_DATABASE_CA`, both secret and optional. The container gets the apps whose keys `apply.env` holds; an app with one of its two keys needs the other, and `apply` refuses otherwise. `apply` prints the apps it configured (`apps=`). `diff` expects both keys of every app that has one live, so a half-configured app is drift. `test/infra/committed.test.ts` keeps this table in step with the declared variables.
+
 | Key | Kind | Holds |
 | --- | --- | --- |
 | `COCKPIT_LOGS_URL` | plain | The Cockpit logs (Loki) data source URL, `https://<id>.logs.cockpit.fr-par.scw.cloud` |
 | `COCKPIT_LOGS_READ_TOKEN` | secret | Cockpit token, scope `read_only_logs` (D20) |
-| `LOKI_STREAM_CRM` | plain, optional | crm's LogQL stream selector; unset, `{resource_name="example-crm-prod"}` |
-| `LOKI_STREAM_SHOP` | plain, optional | shop's LogQL stream selector; unset, `{resource_name="example-shop-prod"}` |
-| `CRM_REDACTED_URL` | secret | crm's redacted reader, `mysql://<user>:<password>@<host>:3306/redacted?ssl=true` (hyde-db) |
-| `SHOP_REDACTED_URL` | secret | shop's redacted reader, same form (hyde-db) |
-| `CRM_DATABASE_CA` | secret | crm's RDB instance CA, PEM text |
-| `SHOP_DATABASE_CA` | secret | shop's RDB instance CA, PEM text |
-| `CRM_DATABASE_CERT_NAME` | plain | The name crm's instance certificate carries, the bare instance id |
-| `SHOP_DATABASE_CERT_NAME` | plain | The name shop's instance certificate carries, the bare instance id |
 | `HYDE_TOKEN_CLAUDE_CODE` | secret | Claude Code's bearer token, `openssl rand -hex 32` |
 | `HYDE_TOKEN_AGENT` | secret | the agent runner's bearer token, `openssl rand -hex 32` |
+| `HYDE_APP_SHOP_REDACTED_URL` | secret, per app | shop's redacted reader, `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true` (hyde-db) |
+| `HYDE_APP_SHOP_DATABASE_CA` | secret, per app | shop's RDB instance CA, PEM text |
+| `HYDE_APP_CRM_REDACTED_URL` | secret, per app | crm's redacted reader, same form |
+| `HYDE_APP_CRM_DATABASE_CA` | secret, per app | crm's RDB instance CA, PEM text |
 | `HYDE_IMAGE_TAG` | | optional: image tag to run. Required to create the container; omitted, an update keeps the live image |
 | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | | optional: the `scw` key, if your profile does not hold it |
 
 A PEM value spans lines: write it in double quotes with its real line breaks, which `node --env-file` keeps:
 
 ```sh
-CRM_DATABASE_CA="-----BEGIN CERTIFICATE-----
+HYDE_APP_CRM_DATABASE_CA="-----BEGIN CERTIFICATE-----
 MIID...
 -----END CERTIFICATE-----"
 ```
 
-Secret values land in `secret-environment-variables`, which `scw` returns only as a digest; plain ones in `environment-variables`. `diff` compares names, never values, so a rotation is never drift. A failing `scw` command is printed with every secret argument redacted. The image runs with `NODE_ENV=production`, in which the server refuses to start when an app's URL is set without `ssl=true`, its CA or its certificate name. `infra/base.yaml` still declares both apps' database variables required, so `apply` asks for all of them.
+Secret values land in `secret-environment-variables`, which `scw` returns only as a digest; plain ones in `environment-variables`. `diff` compares names, never values, so a rotation is never drift. A failing `scw` command is printed with every secret argument redacted. The image runs with `NODE_ENV=production`, in which the server refuses to start when an app's URL is set without `ssl=true` or its CA.
 
 ### Deploy workflow
 
@@ -191,8 +215,7 @@ The workflow reads three repository secrets, none of them a runtime value of the
 
 Gather first (a human, once):
 
-- **The two instance CAs.** crm's is the PEM in `lib/database-ca.ts` on crm's `production` branch; shop's is the equivalent file in shop. Either can also be read with `scw rdb instance get-certificate <instance-id> region=fr-par`. They go into `CRM_DATABASE_CA` and `SHOP_DATABASE_CA`.
-- **The two certificate names**: the bare RDB instance id of each app's database, as the instance certificate carries it, into `CRM_DATABASE_CERT_NAME` and `SHOP_DATABASE_CERT_NAME`.
+- **Each app's instance CA**, from the file its `apps.json` entry names under `database.caSource` (crm's on crm's `production` branch for now). `scripts/wizard/fetch-redacted-sql.sh` writes it as `.redacted-sql/<app>/ca.pem`; `scw rdb instance get-certificate <instance-id> region=fr-par` reads it too. It goes into `HYDE_APP_<NAME>_DATABASE_CA`. The certificate names are already in `apps.json`.
 - **The Loki URL**, into `COCKPIT_LOGS_URL`:
   ```sh
   scw cockpit data-source get <data-source-id> region=fr-par -o json | jq -r .url
@@ -204,7 +227,7 @@ Then:
 1. In the apps' Scaleway organisation, create an IAM application `hyde-mcp-gateway-deploy` with a policy granting `ContainersFullAccess` and `ContainerRegistryFullAccess`, and one API key for it.
 2. Set that key as repository secrets `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`. Repository secrets override the organisation-level pair; without them the workflow fails at the organisation check.
 3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`. Without it the workflow fails at the schema fetch.
-4. Write `apply.env` with every required key above.
+4. Write `apply.env` with every required key above and both keys of each app to configure.
 5. Fetch the schemas, push the first image and create the container, with the `scw` key in your shell and a `gh` login (or `GITHUB_TOKEN`) that can read both app repos:
    ```sh
    pnpm schemas                  # schemas/<app>.hyde-json.json

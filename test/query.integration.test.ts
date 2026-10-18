@@ -14,12 +14,12 @@ const CERT_NAME = process.env.HYDE_TEST_MYSQL_CERT_NAME;
 
 describe.skipIf(!URL_)("query_sql against MySQL", () => {
   const databases = createDatabases(
-    URL_ ? { crm: resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: URL_, ca: undefined, certName: undefined, production: false }) } : {},
+    new Map(URL_ ? [["crm", resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: URL_, ca: undefined, certName: undefined, production: false })]] : []),
   );
   afterAll(() => databases.close());
 
   async function call(sql: string, limit?: number) {
-    const client = await connectInMemory({ sql: { databases, schemas: {} } });
+    const client = await connectInMemory({ sql: { databases, schemas: new Map([["crm", "# crm\n"]]) } });
     const result = await client.callTool({ name: "query_sql", arguments: { app: "crm", sql, limit } });
     await client.close();
     return result;
@@ -78,9 +78,9 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
       return u.toString();
     };
     const tls = (certName: string) =>
-      createDatabases({
-        crm: resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: tlsUrl(), ca: readFileSync(CA_FILE!, "utf8"), certName, production: true }),
-      });
+      createDatabases(new Map([[
+        "crm", resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: tlsUrl(), ca: readFileSync(CA_FILE!, "utf8"), certName, production: true }),
+      ]]));
 
     it("connects when the certificate carries the name", async () => {
       const dbs = tls(CERT_NAME!);

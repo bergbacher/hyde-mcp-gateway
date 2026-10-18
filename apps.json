@@ -1,0 +1,38 @@
+{
+  "apps": {
+    "shop": {
+      "repo": "example-org/shop",
+      "logSchemaPath": "prisma/hyde-json.json",
+      "redactedSchemaPath": "prisma/redacted/redacted-schema.md",
+      "redactedSqlPath": "prisma/redacted",
+      "loki": {
+        "stream": "{resource_name=\"example-shop-prod\"}",
+        "service": "shop"
+      },
+      "database": {
+        "host": "rw-0000.example.invalid",
+        "port": 3306,
+        "sourceDatabase": "shop",
+        "certName": "rw-0000.example.invalid",
+        "caSource": { "repo": "example-org/shop", "path": "lib/database-ca.ts", "ref": "main" }
+      }
+    },
+    "crm": {
+      "repo": "example-org/crm",
+      "logSchemaPath": "prisma/hyde-json.json",
+      "redactedSchemaPath": "prisma/redacted/redacted-schema.md",
+      "redactedSqlPath": "prisma/redacted",
+      "loki": {
+        "stream": "{resource_name=\"example-crm-prod\"}",
+        "service": "crm"
+      },
+      "database": {
+        "host": "rw-0001.example.invalid",
+        "port": 3307,
+        "sourceDatabase": "crm-prod",
+        "certName": "00000000-0000-0000-0000-000000000000",
+        "caSource": { "repo": "example-org/crm", "path": "lib/database-ca.ts", "ref": "production" }
+      }
+    }
+  }
+}

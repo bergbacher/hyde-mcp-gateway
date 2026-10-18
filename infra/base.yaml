@@ -1,5 +1,5 @@
 # hyde-mcp-gateway's Scaleway Serverless Container (D15), in the apps' Scaleway organisation next to
-# shop and crm.
+# the apps it reads.
 #
 # Read by scripts/infra/config.ts and reconciled by scripts/infra/apply.ts
 # (`diff` / `apply` / `verify-organisation`). Copied from crm's
@@ -84,27 +84,21 @@ container:
 # as a digest; secret: false lands in environment-variables. The deploy
 # workflow (`apply --keep-secrets`) sends neither kind: every value here is set
 # by a local `pnpm infra:apply` and kept live by the workflow.
+#
+# Only the global variables are listed here. Each app's are derived from
+# apps.json when this file is loaded (scripts/infra/config.ts
+# appVariableSpecs, D38): HYDE_APP_<NAME>_REDACTED_URL and
+# HYDE_APP_<NAME>_DATABASE_CA, both secret and optional. The connection
+# string is that of the app's redacted read-only database user (hyde-db),
+# `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true`; the CA is the
+# RDB instance's, as PEM text (src/db/connection.ts). An app with either value
+# in apply.env needs both; `apply` refuses otherwise. A `HYDE_APP_` name
+# listed here is refused.
 variables:
   # Loki: the Cockpit logs data source and a token with the `read_only_logs`
   # scope (D20), sent as X-Token (src/config.ts readLokiConfig).
   - { name: COCKPIT_LOGS_URL, required: true, secret: false }
   - { name: COCKPIT_LOGS_READ_TOKEN, required: true, secret: true }
-  # LogQL stream selector per app. Unset, src/config.ts defaults to
-  # {resource_name="example-<app>-prod"}.
-  - { name: LOKI_STREAM_CRM, required: false, secret: false }
-  - { name: LOKI_STREAM_SHOP, required: false, secret: false }
-  # Connection strings of the redacted read-only database users (hyde-db),
-  # `mysql://<user>:<password>@<host>:3306/redacted?ssl=true`.
-  - { name: CRM_REDACTED_URL, required: true, secret: true }
-  - { name: SHOP_REDACTED_URL, required: true, secret: true }
-  # TLS to each RDB instance (src/db/connection.ts): the instance CA as PEM
-  # text, and the name its certificate carries (the bare instance id), which
-  # is checked instead of the host. NODE_ENV=production refuses to start
-  # without both, per app.
-  - { name: CRM_DATABASE_CA, required: true, secret: true }
-  - { name: SHOP_DATABASE_CA, required: true, secret: true }
-  - { name: CRM_DATABASE_CERT_NAME, required: true, secret: false }
-  - { name: SHOP_DATABASE_CERT_NAME, required: true, secret: false }
   # One bearer token per client (D16, src/config.ts). A new client is a new
   # HYDE_TOKEN_<CLIENT> line here and in apply.env.
   - { name: HYDE_TOKEN_CLAUDE_CODE, required: true, secret: true }

@@ -3,28 +3,34 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { parseSchema, redactLine } from "hyde-json";
-import { DEFAULT_STREAMS, readLokiConfig } from "../src/config.ts";
+import { logSources, readLokiConfig } from "../src/config.ts";
 import { createLoki } from "../src/loki.ts";
 import { ERROR_SCAN_LIMIT, countQuery, logQuery } from "../src/mcp/logs.ts";
 import { createServer } from "../src/mcp/server.ts";
 import type { Schemas } from "../src/schemas.ts";
+import { REGISTRY } from "./helpers.ts";
 
 const RECORDED = readFileSync(new URL("./fixtures/loki/query_range.crm.json", import.meta.url), "utf8");
 const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const URL_BASE = "https://loki.test";
 const TOKEN = "read-only-logs-token";
 
-const schemas = {
-  crm: parseSchema({
+const SOURCES = logSources(REGISTRY);
+const CRM = SOURCES.get("crm")!;
+const SHOP = SOURCES.get("shop")!;
+
+const crmSchema = parseSchema({
     app: "crm",
     passIds: true,
     fields: {
       action: "visible", level: "visible", error: "visible", timestamp: "visible", service: "visible",
       message: "text", "message.workspaceId": "visible", "message.email": "hidden", "message.err": "visible",
     },
-  }),
-  shop: parseSchema({ app: "shop", fields: { action: "visible", level: "visible", message: "text" } }),
-};
+});
+const schemas: Schemas = new Map([
+  ["crm", crmSchema],
+  ["shop", parseSchema({ app: "shop", fields: { action: "visible", level: "visible", message: "text" } })],
+]);
 
 /** Raw values the recorded response carries that must never reach a client. */
 const SECRETS = ["jane.doe@example.com", "john.roe@example.org", "+49 171 2345678", "sk_live_9fQ2xLmP4vR8tZ1wY6nB3cD7"];
@@ -47,7 +53,7 @@ async function connect(respond: Respond = recorded, logSchemas: Schemas = schema
     return respond(url);
   }) as typeof globalThis.fetch;
   const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch });
-  const server = createServer("claude-code", { logs: { schemas: logSchemas, loki, streams: DEFAULT_STREAMS, now: () => NOW } });
+  const server = createServer("claude-code", { registry: REGISTRY, logs: { schemas: logSchemas, loki, sources: SOURCES, now: () => NOW } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
@@ -62,11 +68,11 @@ async function connect(respond: Respond = recorded, logSchemas: Schemas = schema
 
 describe("LogQL", () => {
   it("unwraps the envelope twice and filters by service, level and action", () => {
-    expect(logQuery("crm", DEFAULT_STREAMS.crm, { level: "error", action: "send-mail" })).toBe(
+    expect(logQuery(CRM, { level: "error", action: "send-mail" })).toBe(
       '{resource_name="example-crm-prod"} | json | line_format "{{.message}}" | json'
         + ' | service="crm" | level="error" | action="send-mail"',
     );
-    expect(logQuery("shop", DEFAULT_STREAMS.shop)).toBe(
+    expect(logQuery(SHOP)).toBe(
       '{resource_name="example-shop-prod"} | json | line_format "{{.message}}" | json | service="shop"',
     );
     expect(countQuery("Q", 1.5)).toBe("sum(count_over_time(Q [90m]))");
@@ -87,7 +93,7 @@ describe("query_logs", () => {
       .sort((a: [string], b: [string]) => (BigInt(b[0]) > BigInt(a[0]) ? 1 : -1));
     expect(body.lines).toHaveLength(raw.length);
     body.lines.forEach((line: { payload: unknown }, i: number) => {
-      expect(line.payload).toEqual((redactLine(raw[i][1], schemas.crm).line as { message: unknown }).message);
+      expect(line.payload).toEqual((redactLine(raw[i][1], crmSchema).line as { message: unknown }).message);
     });
 
     expect(body.lines.map((l: { timestamp: string }) => l.timestamp)).toEqual([
@@ -110,7 +116,7 @@ describe("query_logs", () => {
     await call("query_logs", { app: "crm", hours: 2, level: "error", action: "send-mail", limit: 10 });
     const range = requests.find((r) => r.url.pathname === "/loki/api/v1/query_range")!;
     const instant = requests.find((r) => r.url.pathname === "/loki/api/v1/query")!;
-    const query = logQuery("crm", DEFAULT_STREAMS.crm, { level: "error", action: "send-mail" });
+    const query = logQuery(CRM, { level: "error", action: "send-mail" });
     const end = BigInt(NOW) * 1_000_000n;
     expect(Object.fromEntries(range.url.searchParams)).toEqual({
       query, start: String(end - 2n * 3_600_000_000_000n), end: String(end), limit: "10", direction: "backward",
@@ -158,7 +164,7 @@ describe("count_errors", () => {
       partial: false,
     });
     const range = requests[0]!.url.searchParams;
-    expect(range.get("query")).toBe(logQuery("crm", DEFAULT_STREAMS.crm, { level: "error" }));
+    expect(range.get("query")).toBe(logQuery(CRM, { level: "error" }));
     expect(range.get("limit")).toBe(String(ERROR_SCAN_LIMIT));
   });
 
@@ -210,7 +216,7 @@ describe("Loki failures", () => {
 
 describe("an app without a log schema (D37)", () => {
   it("is refused by both log tools before Loki is asked; the other app still answers", async () => {
-    const { call, requests } = await connect(recorded, { crm: schemas.crm });
+    const { call, requests } = await connect(recorded, new Map([["crm", crmSchema]]));
     for (const tool of ["query_logs", "count_errors"]) {
       const result = await call(tool, { app: "shop" });
       expect(result.isError).toBe(true);
@@ -230,14 +236,16 @@ describe("tools", () => {
 
 describe("readLokiConfig", () => {
   const env = { COCKPIT_LOGS_URL: "https://abc.logs.cockpit.fr-par.scw.cloud/", COCKPIT_LOGS_READ_TOKEN: "t" };
-  it("reads URL and token, defaults the streams, takes overrides", () => {
-    expect(readLokiConfig(env)).toEqual({ url: "https://abc.logs.cockpit.fr-par.scw.cloud", token: "t", streams: DEFAULT_STREAMS });
-    const custom = readLokiConfig({ ...env, LOKI_STREAM_CRM: '{resource_name="x-crm"}' });
-    expect(custom.streams).toEqual({ shop: DEFAULT_STREAMS.shop, crm: '{resource_name="x-crm"}' });
+  it("reads URL and token, takes each app's stream and service from apps.json, takes overrides", () => {
+    expect(readLokiConfig(REGISTRY, env)).toEqual({ url: "https://abc.logs.cockpit.fr-par.scw.cloud", token: "t", sources: SOURCES });
+    const custom = readLokiConfig(REGISTRY, { ...env, HYDE_APP_CRM_LOKI_STREAM: '{resource_name="x-crm"}' });
+    expect(custom.sources.get("shop")).toEqual(SHOP);
+    expect(custom.sources.get("crm")).toEqual({ stream: '{resource_name="x-crm"}', service: CRM.service });
   });
   it("names every problem", () => {
-    expect(() => readLokiConfig({})).toThrow(/COCKPIT_LOGS_URL is not set; COCKPIT_LOGS_READ_TOKEN is not set/);
-    expect(() => readLokiConfig({ ...env, COCKPIT_LOGS_URL: "ftp://x" })).toThrow(/not an http\(s\) URL/);
-    expect(() => readLokiConfig({ ...env, LOKI_STREAM_SHOP: '{a="b"} | json' })).toThrow(/LOKI_STREAM_SHOP is not a LogQL stream selector/);
+    expect(() => readLokiConfig(REGISTRY, {})).toThrow(/COCKPIT_LOGS_URL is not set; COCKPIT_LOGS_READ_TOKEN is not set/);
+    expect(() => readLokiConfig(REGISTRY, { ...env, COCKPIT_LOGS_URL: "ftp://x" })).toThrow(/not an http\(s\) URL/);
+    expect(() => readLokiConfig(REGISTRY, { ...env, HYDE_APP_SHOP_LOKI_STREAM: '{a="b"} | json' }))
+      .toThrow(/HYDE_APP_SHOP_LOKI_STREAM is not a LogQL stream selector/);
   });
 });

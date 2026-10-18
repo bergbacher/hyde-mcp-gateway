@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
+import { appVariables, parseRegistry, type Registry } from "../../src/registry.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
@@ -41,6 +42,8 @@ export interface VariableSpec {
   name: string;
   required: boolean;
   secret: boolean;
+  /** Set on the variables derived from apps.json: the app they configure. */
+  app?: string;
 }
 
 export interface InfraConfig {
@@ -51,7 +54,26 @@ export interface InfraConfig {
   projectId: string;
   registryEndpoint: string;
   container: ContainerConfig;
+  /** infra/base.yaml `variables:`, then the per-app ones derived from apps.json (appVariableSpecs). */
   variables: VariableSpec[];
+}
+
+/**
+ * The per-app runtime variables, derived from the registry at load time, never
+ * listed by hand (D38): for each app its redacted reader URL and instance CA,
+ * both secret and optional, since an app without them is refused at its SQL
+ * tools rather than stopping the server (D37). The registry already holds the
+ * certificate name and stream selector, so their overrides are not declared;
+ * an app is configured on the container by its values in apply.env.
+ */
+export function appVariableSpecs(registry: Registry): VariableSpec[] {
+  return [...registry.apps.keys()].flatMap((app) => {
+    const vars = appVariables(app);
+    return [
+      { name: vars.redactedUrl, required: false, secret: true, app },
+      { name: vars.databaseCa, required: false, secret: true, app },
+    ];
+  });
 }
 
 // --- YAML and merge --------------------------------------------------------
@@ -96,6 +118,7 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
   const read = deps.readFileSync ?? ((p: string) => fs.readFileSync(p, "utf8"));
   const root = deps.repoRoot ?? REPO_ROOT;
   const basePath = path.join(root, "infra", "base.yaml");
+  const registryPath = path.join(root, "apps.json");
   const overlayPath = path.join(root, "infra", "environments", `${environment}.yaml`);
 
   let baseText: string;
@@ -113,6 +136,20 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
 
   const merged = deepMerge(parseInfraYaml(baseText), parseInfraYaml(overlayText)) as Omit<InfraConfig, "environment">;
 
+  let registryText: string;
+  try {
+    registryText = read(registryPath);
+  } catch {
+    throw new Error(`Could not read the app registry at ${registryPath}`);
+  }
+  let registryJson: unknown;
+  try {
+    registryJson = JSON.parse(registryText);
+  } catch {
+    throw new Error(`${registryPath} is not JSON`);
+  }
+  const derived = appVariableSpecs(parseRegistry(registryJson, registryPath));
+
   // Per environment, never in the base, so environments cannot collide on one
   // name in a namespace that also holds shop's and crm's containers.
   if (!merged.container?.name) {
@@ -121,7 +158,13 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
   if (!merged.organizationId || !merged.projectId) {
     throw new Error("organizationId and projectId must be set in infra/base.yaml: every run is verified against them.");
   }
-  return { ...merged, variables: merged.variables ?? [], environment };
+  const declared = merged.variables ?? [];
+  for (const v of declared) {
+    if (v.name.startsWith("HYDE_APP_")) {
+      throw new Error(`${v.name} is listed in infra/; per-app variables are derived from apps.json, never listed by hand.`);
+    }
+  }
+  return { ...merged, variables: [...declared, ...derived], environment };
 }
 
 // --- scw seam --------------------------------------------------------------

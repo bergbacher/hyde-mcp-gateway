@@ -112,10 +112,15 @@ export function read(ctx: KindContext): LiveContainer | null {
   return match ? getById(ctx, match.id) : null;
 }
 
-/** Names whose presence live is expected: every required one, plus an optional one set deliberately. */
+/**
+ * Names whose presence live is expected: every required one, an optional one
+ * set deliberately, and every variable of an app (derived from apps.json)
+ * once any of that app's variables is live, so a half-configured app is drift.
+ */
 function expectedNames(ctx: KindContext, secret: boolean, live: string[]): string[] {
+  const liveApps = new Set(ctx.config.variables.filter((v) => v.app && live.includes(v.name)).map((v) => v.app));
   return ctx.config.variables
-    .filter((v) => v.secret === secret && (v.required || live.includes(v.name)))
+    .filter((v) => v.secret === secret && (v.required || live.includes(v.name) || (v.app && liveApps.has(v.app))))
     .map((v) => v.name)
     .sort();
 }
@@ -134,12 +139,13 @@ export function diff(ctx: KindContext, live: LiveContainer | null): DiffEntry[] 
 
   // Names only, never values: a rotated secret is not drift; a name that
   // appears or disappears is.
+  const allLive = [...Object.keys(live.environment_variables ?? {}), ...Object.keys(live.secret_environment_variables ?? {})];
   for (const [field, secret, liveMap] of [
     ["environment-variables", false, live.environment_variables],
     ["secret-environment-variables", true, live.secret_environment_variables],
   ] as const) {
     const liveNames = Object.keys(liveMap ?? {}).sort();
-    const expected = expectedNames(ctx, secret, liveNames);
+    const expected = expectedNames(ctx, secret, allLive);
     if (JSON.stringify(expected) !== JSON.stringify(liveNames)) {
       entries.push({ field, status: "divergent", live: liveNames, desired: expected });
     }

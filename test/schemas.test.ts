@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadSchemas, schemaFile } from "../src/schemas.ts";
+import { REGISTRY } from "./helpers.ts";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/schemas/", import.meta.url));
 const dirs: string[] = [];
@@ -22,38 +23,38 @@ afterEach(() => {
 
 describe("loadSchemas", () => {
   it("loads and validates both apps' schemas", () => {
-    const schemas = loadSchemas(FIXTURES);
-    expect(schemas.crm?.app).toBe("crm");
-    expect(schemas.crm?.fields["message.workspaceId"]).toBe("visible");
-    expect(schemas.shop?.fields["message.to"]).toBe("hidden");
-    expect(schemas.shop?.passIds).toBe(true);
+    const schemas = loadSchemas(REGISTRY, FIXTURES);
+    expect(schemas.get("crm")?.app).toBe("crm");
+    expect(schemas.get("crm")?.fields["message.workspaceId"]).toBe("visible");
+    expect(schemas.get("shop")?.fields["message.to"]).toBe("hidden");
+    expect(schemas.get("shop")?.passIds).toBe(true);
   });
 
   it("returns the apps whose file exists and leaves the others out (D37)", () => {
-    const schemas = loadSchemas(dirWith("shop"));
-    expect(Object.keys(schemas)).toEqual(["shop"]);
-    expect(schemas.shop?.app).toBe("shop");
-    expect(schemas.crm).toBeUndefined();
+    const schemas = loadSchemas(REGISTRY, dirWith("shop"));
+    expect([...schemas.keys()]).toEqual(["shop"]);
+    expect(schemas.get("shop")?.app).toBe("shop");
+    expect(schemas.get("crm")).toBeUndefined();
   });
 
   it("throws naming both when neither exists", () => {
     const dir = dirWith();
-    expect(() => loadSchemas(dir)).toThrow(/No log schema/);
-    expect(() => loadSchemas(dir)).toThrow(/shop: .*shop\.hyde-json\.json is missing\n.*crm: .* is missing/);
-    expect(() => loadSchemas(dir)).toThrow(/pnpm schemas/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/No log schema/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*shop\.hyde-json\.json is missing\n.*crm: .* is missing/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/pnpm schemas/);
   });
 
   it("throws on a present file that is not JSON or not a valid schema, even when the other app is fine", () => {
     const dir = dirWith("crm", "shop");
     writeFileSync(schemaFile("shop", dir), "{ not json");
-    expect(() => loadSchemas(dir)).toThrow(/shop: .*JSON/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*JSON/);
     writeFileSync(schemaFile("shop", dir), JSON.stringify({ app: "shop", fields: { "message.x": "shown" } }));
-    expect(() => loadSchemas(dir)).toThrow(/shop: .*"shown" is not one of/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*"shown" is not one of/);
   });
 
   it("throws when a schema is filed under the wrong app", () => {
     const dir = dirWith("crm");
     copyFileSync(schemaFile("crm", FIXTURES), schemaFile("shop", dir));
-    expect(() => loadSchemas(dir)).toThrow(/shop: .*"app" is "crm", expected "shop"/);
+    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*"app" is "crm", expected "shop"/);
   });
 });

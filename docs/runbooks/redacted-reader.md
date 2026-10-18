@@ -1,28 +1,23 @@
-# Runbook: redacted_reader on the crm and shop databases
+# Runbook: redacted_reader on each app's database
 
 hyde-mcp-gateway reads each app's database as `redacted_reader`, an account that can `SELECT` from the views in database `redacted` and nothing else (LEDGER D2, D18). hyde-db generates the views from each app's `@hyde` annotations as two scripts in the app repo: `prisma/redacted/redacted-views.sql` (apply) and `prisma/redacted/redacted-views-drop.sql` (drop). Only an admin of each RDB instance can run them (D19), so a human runs them through a wizard:
 
 | Script | What it does |
 |---|---|
-| `scripts/wizard/fetch-redacted-sql.sh` | Fetches both scripts and the instance CA (`lib/database-ca.ts`, as `ca.pem`) of each app (or only the app named by `--app`) from GitHub into `.redacted-sql/` (gitignored). |
-| `scripts/wizard/redacted-reader.sh` | For crm, then shop (or only the app named by `--app`): admin connection → drop and apply the views → set the reader's password and unlock it → verify as the reader → write `CRM_REDACTED_URL` / `SHOP_REDACTED_URL` to `apply.env` (gitignored). |
+| `scripts/wizard/fetch-redacted-sql.sh` | Fetches both scripts (from the entry's `repo` and `redactedSqlPath`) and the instance CA (from `database.caSource`, as `ca.pem`) of each app in `apps.json` (or only the apps named by `--app`) from GitHub into `.redacted-sql/` (gitignored). |
+| `scripts/wizard/redacted-reader.sh` | For each app in `apps.json` order (or only the apps named by `--app`): admin connection → drop and apply the views → set the reader's password and unlock it → verify as the reader → write `HYDE_APP_<NAME>_REDACTED_URL` to `apply.env` (gitignored). |
 
 Every step says what it runs and waits for a yes. Every step is idempotent, so after a failure fix the cause and run the wizard again from the start. `--dry-run` asks nothing, runs nothing, writes nothing, and prints every statement with passwords masked.
 
-Both scripts take `--app shop` or `--app crm` to handle only that app (LEDGER D37); without it they handle both. The other app is not fetched, not touched and needs no files, and its `<APP>_REDACTED_URL` in `apply.env` stays as it is. hyde-mcp-gateway answers an app without a URL or redacted schema as not configured, so one app can go live before the other. The reader wizard's SQL paths are optional: one per selected app, in the order crm, shop, defaulting to `.redacted-sql/<app>/redacted-views.sql`.
+Both scripts read the apps from `apps.json` (LEDGER D38) and take `--app <name>` (repeatable) to handle only those apps (LEDGER D37); without it they handle every registered app. The other apps are not fetched, not touched and need no files, and their `HYDE_APP_<NAME>_REDACTED_URL` in `apply.env` stays as it is. hyde-mcp-gateway answers an app without a URL or redacted schema as not configured, so one app can go live before another. The reader wizard's SQL paths are optional: one per selected app, in the order the apps are selected (`--app` order, else `apps.json` order), defaulting to `.redacted-sql/<app>/redacted-views.sql`. Both need `node` to read `apps.json`.
 
 ## What you need
 
 - For each instance, an admin account and its password. Per hyde-db it needs `CREATE USER`, `CREATE`, `DROP`, `CREATE VIEW` and `SELECT` on database `redacted`, `SELECT` on the source tables, `GRANT OPTION` on the views, `SELECT` on `mysql.*` and `CREATE TEMPORARY TABLES` on the source database. If one is missing, the apply script refuses before it changes anything and prints the `GRANT` to paste.
 - MySQL's command-line client 8.x (`brew install mysql-client`), not MariaDB's: the wizard uses `--ssl-mode`.
-- `gh`, logged in with read access to the selected apps' repos (`example-org/crm`, `example-org/shop`), and `openssl`.
+- `gh`, logged in with read access to the selected apps' repos (each entry's `repo` and `database.caSource.repo`), and `openssl`.
 
-| App | Host | Port | Source database |
-|---|---|---|---|
-| crm | `rw-0001.example.invalid` | 3307 | `crm-prod` |
-| shop | `rw-0000.example.invalid` | 3306 | `shop` |
-
-The wizard offers these as defaults. Use the host name, never the IP: TLS verification needs the name. The wizard refuses an address.
+Each app's host, port and source database are its `database` entry in [`apps.json`](../../apps.json). The wizard offers them as defaults. Use the host name, never the IP: TLS verification needs the name. The wizard refuses an address.
 
 ## First run
 
@@ -38,19 +33,19 @@ The wizard offers these as defaults. Use the host name, never the IP: TLS verifi
    bash scripts/wizard/fetch-redacted-sql.sh --app shop
    ```
 
-   crm's `lib/database-ca.ts` reaches `main` only with its Scaleway migration. Until then, take the CA from that branch: `CRM_CA_REF=production bash scripts/wizard/fetch-redacted-sql.sh`. Before the annotation PRs are merged, `--ref feat/hyde-db-annotations` fetches the scripts from their branch.
+   The CA always comes from the entry's `database.caSource`, ref included. crm's `lib/database-ca.ts` reaches `main` only with its Scaleway migration, so its entry names `production` until then; change the ref in `apps.json` once it is merged. `--ref` applies to the hyde-db scripts only: before the annotation PRs are merged, `--ref feat/hyde-db-annotations` fetches them from their branch. `--dry-run` prints what would be fetched.
 
 2. Optional: read what will run.
 
    ```sh
-   bash scripts/wizard/redacted-reader.sh --dry-run .redacted-sql/crm/redacted-views.sql .redacted-sql/shop/redacted-views.sql
+   bash scripts/wizard/redacted-reader.sh --dry-run .redacted-sql/shop/redacted-views.sql .redacted-sql/crm/redacted-views.sql
    bash scripts/wizard/redacted-reader.sh --dry-run --app shop   # shop only, default path
    ```
 
 3. Run it:
 
    ```sh
-   bash scripts/wizard/redacted-reader.sh .redacted-sql/crm/redacted-views.sql .redacted-sql/shop/redacted-views.sql
+   bash scripts/wizard/redacted-reader.sh .redacted-sql/shop/redacted-views.sql .redacted-sql/crm/redacted-views.sql
    bash scripts/wizard/redacted-reader.sh --app shop .redacted-sql/shop/redacted-views.sql   # shop only
    ```
 
@@ -59,7 +54,7 @@ The wizard offers these as defaults. Use the host name, never the IP: TLS verifi
    - **Drop and apply.** The drop script revokes the reader's grants and drops `redacted`. The apply script recreates it, creates `redacted_reader` locked and without a password when it is missing, and grants `SELECT` on each view. A refusal prints `hyde-db: <problem> Fix: <statement>`. Paste the fix as the admin, then run the wizard again.
    - **Password and unlock.** `ALTER USER 'redacted_reader'@'%' IDENTIFIED BY '…' REQUIRE SSL ACCOUNT UNLOCK`, then a check that `mysql.user` shows the account unlocked and requiring TLS. The apply and drop scripts never change the password, the lock state or the TLS requirement, so these survive every re-apply.
    - **Verify.** As the reader, over TLS: the session has a cipher, `SELECT 1 FROM redacted.<first view> LIMIT 1` succeeds, and `SELECT 1 FROM <source database>.<first table> LIMIT 1` is refused with `ERROR 1142`. This step cannot be skipped.
-   - **Connection string.** It writes `mysql://redacted_reader:<password>@<host>:<port>/redacted?ssl=true` to `apply.env`. `ssl=true` matches the apps' runtime strings, so the runtime verifies the server against the app's instance CA (`lib/database-ca.ts`), as the apps' `lib/database-connection.ts` does.
+   - **Connection string.** It writes `HYDE_APP_<NAME>_REDACTED_URL=mysql://redacted_reader:<password>@<host>:<port>/redacted?ssl=true` to `apply.env`. `ssl=true` matches the apps' runtime strings, so the runtime verifies the server against the app's instance CA (`lib/database-ca.ts`), as the apps' `lib/database-connection.ts` does.
 
 4. Report back which stages ran and the verify output, with names only and no values. Keep `apply.env`: hyde-mcp-gateway's deployment takes the strings from there.
 
@@ -98,7 +93,7 @@ If the wizard stops between the password stage and the write, the new password i
 
 | Symptom | Cause and fix |
 |---|---|
-| `SSL connection error` or a certificate error at the first connect | The `ca.pem` does not match the instance. Fetch again, with `CRM_CA_REF` for crm (see First run). As a last resort, `MYSQL_SSL_MODE=REQUIRED` keeps the connection encrypted but skips verifying the server. Say so when you report back. |
+| `SSL connection error` or a certificate error at the first connect | The `ca.pem` does not match the instance. Check the app's `database.caSource` in `apps.json` and fetch again (see First run). As a last resort, `MYSQL_SSL_MODE=REQUIRED` keeps the connection encrypted but skips verifying the server. Say so when you report back. |
 | `hyde-db: … Fix: …` during apply or drop | Paste the printed fix as the admin, then run the wizard again. All refusals are listed in hyde-db, "What the MySQL apply script refuses". |
 | `ALTER USER failed` | `redacted_reader` does not exist yet. Run the drop-and-apply stage first. |
 | Reader login fails with 1045 | The password in `apply.env` is not the one set. This happens when the password stage was skipped on a first run. Run the wizard again and answer yes at the password stage. |

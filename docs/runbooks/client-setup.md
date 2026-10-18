@@ -56,7 +56,7 @@ With 1Password CLI, read it the same way: `op read "op://<vault>/hyde-mcp-gatewa
 
 ### Check the connection
 
-Start `claude` in the repo. The first time, it asks whether to trust the project's MCP server; accept. `/mcp` should show `hyde-mcp-gateway` as connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with `app: "crm"`. The answer `{"app":"crm","client":"claude-code"}` confirms the token and the client name.
+Start `claude` in the repo. The first time, it asks whether to trust the project's MCP server; accept. `/mcp` should show `hyde-mcp-gateway` as connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with `app: "crm"`. The answer `{"app":"crm","client":"claude-code","apps":["shop","crm"]}` confirms the token and the client name, and lists the apps registered in `apps.json`.
 
 If `/mcp` shows the server as failed, check these:
 
@@ -139,7 +139,7 @@ Delete its `variables:` entry in `infra/base.yaml` and its line in `apply.env`, 
 
 ## 3. First analysis
 
-This walkthrough is a session in Claude Code with the server connected. You ask in plain language and Claude calls the tools (`mcp__hyde-mcp-gateway__<tool>`). Below, calls are written as `tool(args)` in parameter order; the tools take named arguments. Every tool takes `app`, `"crm"` or `"shop"`. Results are JSON text. The values shown are illustrative; the shape is what to check.
+This walkthrough is a session in Claude Code with the server connected. You ask in plain language and Claude calls the tools (`mcp__hyde-mcp-gateway__<tool>`). Below, calls are written as `tool(args)` in parameter order; the tools take named arguments. Every tool takes `app`, the name of an app in `apps.json` (today `"shop"` or `"crm"`); another name is refused with `unknown app <name>; registered: …`. Results are JSON text. The values shown are illustrative; the shape is what to check.
 
 ### Step 1: what is failing: `count_errors(app, 24)`
 

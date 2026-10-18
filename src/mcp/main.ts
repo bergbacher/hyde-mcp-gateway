@@ -1,29 +1,33 @@
-import { APPS, readConfig, readLokiConfig } from "../config.ts";
+import { readConfig, readLokiConfig } from "../config.ts";
 import { createDatabases } from "../db/pool.ts";
 import { createLoki } from "../loki.ts";
+import { appNames, loadRegistry } from "../registry.ts";
 import { loadRedactedSchemas, loadSchemas } from "../schemas.ts";
 import { createApp } from "./http.ts";
 import { logsMissing } from "./logs.ts";
 import { sqlMissing, toolNames, type ServerOptions } from "./server.ts";
 
-const config = readConfig();
-const lokiConfig = readLokiConfig();
+// The apps every tool accepts (apps.json, D38). An invalid registry stops the start.
+const registry = loadRegistry();
+const config = readConfig(registry);
+const lokiConfig = readLokiConfig(registry);
 // The apps whose files are present (D37). Refuses to start only when no log
 // schema exists or a present one is invalid; an app without its schema is
 // refused at the log tools, since an absent schema would hide every field.
-const logSchemas = loadSchemas();
+const logSchemas = loadSchemas(registry);
 // An app without its redacted-schema.md is refused at describe_schema and query_sql.
-const redactedSchemas = loadRedactedSchemas();
+const redactedSchemas = loadRedactedSchemas(registry);
 
 const options: ServerOptions = {
-  logs: { schemas: logSchemas, loki: createLoki({ url: lokiConfig.url, token: lokiConfig.token }), streams: lokiConfig.streams },
+  registry,
+  logs: { schemas: logSchemas, loki: createLoki({ url: lokiConfig.url, token: lokiConfig.token }), sources: lokiConfig.sources },
   sql: { databases: createDatabases(config.databases), schemas: redactedSchemas },
 };
 
 /** Per app and tool group, what is missing; an empty list means configured. */
-const missing = APPS.map((app) => ({
+const missing = appNames(registry).map((app) => ({
   app,
-  groups: { logs: logsMissing(app, options.logs?.schemas), sql: sqlMissing(app, options.sql) },
+  groups: { logs: logsMissing(app, options.logs), sql: sqlMissing(app, options.sql) },
 }));
 
 createApp(config, options).listen(config.port, () => {
@@ -38,10 +42,10 @@ createApp(config, options).listen(config.port, () => {
       Object.entries(groups).filter(([, lacks]) => lacks.length === 0).map(([group]) => group),
     ])),
     schemas: {
-      logs: Object.fromEntries(Object.entries(logSchemas).map(([app, s]) => [app, Object.keys(s.fields).length])),
-      redacted: Object.keys(redactedSchemas),
+      logs: Object.fromEntries([...logSchemas].map(([app, s]) => [app, Object.keys(s.fields).length])),
+      redacted: [...redactedSchemas.keys()],
     },
-    streams: lokiConfig.streams,
+    streams: Object.fromEntries([...lokiConfig.sources].map(([app, s]) => [app, s.stream])),
   }));
   for (const { app, groups } of missing) {
     const lacks = [...groups.logs, ...groups.sql];

@@ -13,7 +13,9 @@
 //
 // `apply` writes every declared variable from the environment
 // (`pnpm infra:apply` loads apply.env) and refuses, listing each missing
-// required name, before any write. `--keep-secrets` is the deploy workflow's
+// required name, before any write. The per-app variables are derived from
+// apps.json (config.ts appVariableSpecs); the container gets the apps whose
+// values apply.env holds, and an app with one of its values needs all. `--keep-secrets` is the deploy workflow's
 // mode: it sends no runtime variable at all, secret or plain, so
 // `container update` keeps the live ones, and it refuses to create the
 // container, because a container created without them would not start
@@ -88,10 +90,23 @@ export type RunApplyResult =
   | { ok: true; containerId: string; endpoint?: string }
   | { ok: false; missing: string[]; error?: string };
 
-/** Every required name missing from `env`, in declaration order, all at once. */
+/** The apps with at least one of their derived variables set in `env`: the apps this apply configures. */
+export function configuredApps(config: InfraConfig, env: Record<string, string | undefined>): string[] {
+  return [...new Set(config.variables.filter((v) => v.app && env[v.name]).map((v) => v.app!))];
+}
+
+/**
+ * Every required name missing from `env`, in declaration order, all at once.
+ * An app's derived variables are optional as a group, not one by one: an app
+ * with any of them set needs all of them, since the server refuses to start
+ * with a URL but no CA in production.
+ */
 export function collectMissing(config: InfraConfig, env: Record<string, string | undefined>, keepSecrets: boolean): string[] {
   // --keep-secrets sends no runtime variable, so it needs none.
-  const missing = keepSecrets ? [] : config.variables.filter((v) => v.required && !env[v.name]).map((v) => v.name);
+  const apps = new Set(configuredApps(config, env));
+  const missing = keepSecrets
+    ? []
+    : config.variables.filter((v) => (v.required || (v.app && apps.has(v.app))) && !env[v.name]).map((v) => v.name);
   // The workflow always deploys a commit; a local apply may keep the live image.
   if (keepSecrets && !env[container.IMAGE_TAG_VARIABLE]) missing.push(container.IMAGE_TAG_VARIABLE);
   return missing;
@@ -208,6 +223,7 @@ export function runCli(argv: string[], deps: CliDeps): number {
     return 1;
   }
   log(`Applied infrastructure config for "${args.environment}"${args.keepSecrets ? " (secrets kept as live)" : ""}.`);
+  if (!args.keepSecrets) log(`apps=${configuredApps(config, deps.env).join(",")}`);
   log(`containerId=${result.containerId}`);
   if (result.endpoint) log(`endpoint=${result.endpoint}`);
   return 0;

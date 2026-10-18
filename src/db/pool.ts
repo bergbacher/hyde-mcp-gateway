@@ -10,7 +10,7 @@
 
 import { checkServerIdentity, TLSSocket } from "node:tls";
 import mysql from "mysql2/promise";
-import type { App } from "../config.ts";
+import type { App } from "../registry.ts";
 import type { DatabaseConfig } from "./connection.ts";
 
 export interface Databases {
@@ -20,13 +20,13 @@ export interface Databases {
   close(): Promise<void>;
 }
 
-export function createDatabases(configs: Partial<Record<App, DatabaseConfig>>): Databases {
+export function createDatabases(configs: ReadonlyMap<App, DatabaseConfig>): Databases {
   const pools = new Map<App, mysql.Pool>();
   const verified = new WeakSet<object>();
 
   function pool(app: App): mysql.Pool {
-    const config = configs[app];
-    if (!config) throw new Error(`No database configured for ${app} (${app.toUpperCase()}_REDACTED_URL)`);
+    const config = configs.get(app);
+    if (!config) throw new Error(`No database configured for ${app}`);
     let p = pools.get(app);
     if (!p) {
       p = mysql.createPool({
@@ -49,10 +49,10 @@ export function createDatabases(configs: Partial<Record<App, DatabaseConfig>>): 
   }
 
   return {
-    has: (app) => configs[app] !== undefined,
+    has: (app) => configs.has(app),
     async connect(app) {
       const conn = await pool(app).getConnection();
-      const servername = configs[app]!.tls?.servername;
+      const servername = configs.get(app)!.tls?.servername;
       if (servername && !verified.has(conn.connection)) {
         try {
           verifyIdentity(conn, servername);

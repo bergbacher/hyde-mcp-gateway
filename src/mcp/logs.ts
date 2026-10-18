@@ -1,17 +1,19 @@
-// The log tools (D12, D14). The LogQL is built here from validated parameters,
-// never taken from the client, so the token scope and the service filter
-// cannot be bypassed. Every line Loki returns passes through hyde-json with
-// the app's schema before it leaves the server; Loki's stream labels, which
-// hold raw extracted values, are never read. An app without a log schema is
-// refused before Loki is asked (D37).
+// The log tools (D12, D14). The LogQL is built here from validated parameters
+// and the app's registry entry (stream selector and `service`, D38), never
+// taken from the client, so the token scope and the service filter cannot be
+// bypassed. Every line Loki returns passes through hyde-json with the app's
+// schema before it leaves the server; Loki's stream labels, which hold raw
+// extracted values, are never read. An app without a log schema is refused
+// before Loki is asked (D37).
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { redactLine, type Json, type LogSchema } from "hyde-json";
 import { z } from "zod";
-import { SERVICES, type App } from "../config.ts";
+import type { LogSource } from "../config.ts";
 import { LokiError, nsOf, type Loki, type LokiEntry } from "../loki.ts";
+import type { App, Registry } from "../registry.ts";
 import type { Schemas } from "../schemas.ts";
-import { appSchema, error, notConfigured, text } from "./server.ts";
+import { appSchema, error, forApp, notConfigured, text } from "./server.ts";
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
@@ -22,8 +24,8 @@ export interface LogsOptions {
   /** The log schemas present; an app left out is refused (D37). */
   schemas: Schemas;
   loki: Loki;
-  /** app → LogQL stream selector */
-  streams: Readonly<Record<App, string>>;
+  /** app → stream selector and service (src/config.ts readLokiConfig) */
+  sources: ReadonlyMap<App, LogSource>;
   /** Clock in ms, for tests. */
   now?: () => number;
 }
@@ -37,10 +39,10 @@ export interface LogFilter {
  * `<stream> | json | line_format "{{.message}}" | json | service="…" [| level="…"] [| action="…"]`.
  * Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the
  * first `| json` opens the envelope, `line_format` makes the app line the log
- * line, the second `| json` extracts its fields (crm docs/operations.md).
+ * line, the second `| json` extracts its fields (the apps' docs/operations.md).
  */
-export function logQuery(app: App, stream: string, filter: LogFilter = {}): string {
-  const stages = [stream, "json", 'line_format "{{.message}}"', "json", `service=${quote(SERVICES[app])}`];
+export function logQuery(source: LogSource, filter: LogFilter = {}): string {
+  const stages = [source.stream, "json", 'line_format "{{.message}}"', "json", `service=${quote(source.service)}`];
   if (filter.level) stages.push(`level=${quote(filter.level)}`);
   if (filter.action) stages.push(`action=${quote(filter.action)}`);
   return stages.join(" | ");
@@ -62,8 +64,11 @@ const hours = z.number().positive("hours must be positive")
   .describe(`How far back to read, in hours (default 24, at most ${MAX_HOURS})`);
 
 /** What `app` lacks for the log tools, as their error names it; empty when ready. */
-export function logsMissing(app: App, schemas: Schemas | undefined): string[] {
-  return schemas?.[app] ? [] : [`schemas/${app}.hyde-json.json is missing`];
+export function logsMissing(app: App, logs: Pick<LogsOptions, "schemas" | "sources"> | undefined): string[] {
+  return [
+    ...(logs?.schemas.has(app) ? [] : [`schemas/${app}.hyde-json.json is missing`]),
+    ...(logs?.sources.has(app) ? [] : ["no Loki stream"]),
+  ];
 }
 
 export interface LogLine {
@@ -73,7 +78,8 @@ export interface LogLine {
   payload: Json;
 }
 
-export function registerLogTools(server: McpServer, { schemas, loki, streams, now = Date.now }: LogsOptions) {
+export function registerLogTools(server: McpServer, registry: Registry, options: LogsOptions) {
+  const { schemas, loki, sources, now = Date.now } = options;
   function window(h: number) {
     const end = now();
     return { start: nsOf(end - h * 3_600_000), end: nsOf(end) };
@@ -87,7 +93,7 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
         "Every line is redacted by the app's log field schema: undeclared and hidden fields read `[hidden]`, free text is scrubbed. " +
         "Returns how many lines matched and how many were returned.",
       inputSchema: {
-        app: appSchema,
+        app: appSchema(registry),
         hours,
         level: z.enum(["error", "info"]).optional().describe('Only lines of this level: "error" or "info"'),
         action: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/, "action must be an action name (letters, digits, _ . : / -)")
@@ -97,11 +103,12 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ app, hours: h, level, action, limit }) => {
-      const schema = schemas[app];
-      if (!schema) return notConfigured(app, logsMissing(app, schemas));
+    forApp(registry, async ({ app, hours: h, level, action, limit }) => {
+      const schema = schemas.get(app);
+      const source = sources.get(app);
+      if (!schema || !source) return notConfigured(app, logsMissing(app, options));
       return guard(async () => {
-        const query = logQuery(app, streams[app], { level, action });
+        const query = logQuery(source, { level, action });
         const { start, end } = window(h);
         const [entries, matched] = await Promise.all([
           loki.queryRange(query, { start, end, limit }),
@@ -110,7 +117,7 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
         const lines = entries.map((e) => toLine(e, schema));
         return { matched: Math.max(matched, lines.length), returned: lines.length, lines };
       });
-    },
+    }),
   );
 
   server.registerTool(
@@ -119,14 +126,15 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
       description:
         "Counts the app's error lines of the last `hours` by action, most frequent first. " +
         `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there.`,
-      inputSchema: { app: appSchema, hours },
+      inputSchema: { app: appSchema(registry), hours },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ app, hours: h }) => {
-      const schema = schemas[app];
-      if (!schema) return notConfigured(app, logsMissing(app, schemas));
+    forApp(registry, async ({ app, hours: h }) => {
+      const schema = schemas.get(app);
+      const source = sources.get(app);
+      if (!schema || !source) return notConfigured(app, logsMissing(app, options));
       return guard(async () => {
-        const entries = await loki.queryRange(logQuery(app, streams[app], { level: "error" }), {
+        const entries = await loki.queryRange(logQuery(source, { level: "error" }), {
           ...window(h), limit: ERROR_SCAN_LIMIT,
       });
       const counts = new Map<string, number>();
@@ -139,7 +147,7 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
         .sort((a, b) => b.count - a.count || a.action.localeCompare(b.action));
       return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
       });
-    },
+    }),
   );
 }
 

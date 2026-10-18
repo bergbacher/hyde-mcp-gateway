@@ -1,73 +1,87 @@
 #!/usr/bin/env bash
 #
-# Fetches what scripts/wizard/redacted-reader.sh needs from each app repo:
+# Fetches what scripts/wizard/redacted-reader.sh needs from each registered
+# app's repo (apps.json, D38):
 #
-#   prisma/redacted/redacted-views.sql       hyde-db apply script
-#   prisma/redacted/redacted-views-drop.sql  hyde-db drop script
-#   lib/database-ca.ts                       instance CA, extracted to ca.pem
+#   <redactedSqlPath>/redacted-views.sql       hyde-db apply script
+#   <redactedSqlPath>/redacted-views-drop.sql  hyde-db drop script
+#   <database.caSource.path>                   instance CA, extracted to ca.pem
 #
-#   bash scripts/wizard/fetch-redacted-sql.sh [--app shop|crm]... [--ref <git-ref>] [--out <dir>]
+#   bash scripts/wizard/fetch-redacted-sql.sh [--app <name>]... [--ref <git-ref>] [--out <dir>] [--dry-run]
 #
-# --app (repeatable) fetches only that app (D37); without it, both. --ref
-# defaults to main; --out to .redacted-sql/ (gitignored). The CA comes from
-# CRM_CA_REF / SHOP_CA_REF when set, else from --ref: crm's
-# lib/database-ca.ts reaches main only with its Scaleway migration, so until
-# then pass CRM_CA_REF=production. Writes <out>/<app>/ per
-# app, with redacted-views.sql, redacted-views-drop.sql and ca.pem. Needs gh,
-# logged in with read access to the selected apps' repos. Nothing secret is
-# fetched.
+# --app (repeatable) fetches only that app (D37); without it, every app in
+# apps.json. --ref is the ref of the hyde-db scripts, default main; the CA
+# always comes from the entry's database.caSource (repo, path, ref). --out
+# defaults to .redacted-sql/ (gitignored). Writes <out>/<app>/ per app, with
+# redacted-views.sql, redacted-views-drop.sql and ca.pem. --dry-run prints
+# what would be fetched and fetches nothing. Needs gh, logged in with read
+# access to the selected apps' repos, and node (it reads apps.json through
+# scripts/registry.ts; HYDE_APPS_FILE points at another registry). Nothing
+# secret is fetched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REF=main
 OUT="$ROOT/.redacted-sql"
+DRY_RUN=0
 APPS=()
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+registry() { node "$ROOT/scripts/registry.ts" "$@"; }
+
+REGISTERED=()
+while IFS= read -r name; do REGISTERED+=("$name"); done < <(registry names)
+((${#REGISTERED[@]})) || die "apps.json registers no app"
 
 while (($#)); do
   case "$1" in
     --app)
-      case "${2:-}" in
-        crm|shop) [[ " ${APPS[*]-} " == *" $2 "* ]] || APPS+=("$2"); shift 2 ;;
-        *) printf 'error: --app needs crm or shop\n' >&2; exit 2 ;;
-      esac ;;
+      if [[ -z "${2:-}" || " ${REGISTERED[*]} " != *" $2 "* ]]; then
+        printf 'error: --app needs one of %s\n' "${REGISTERED[*]}" >&2; exit 2
+      fi
+      [[ " ${APPS[*]-} " == *" $2 "* ]] || APPS+=("$2"); shift 2 ;;
     --ref) REF="${2:?--ref needs a value}"; shift 2 ;;
     --out) OUT="${2:?--out needs a value}"; shift 2 ;;
-    *) sed -n '2,19p' "$0"; exit 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *) sed -n '2,21p' "$0"; exit 2 ;;
   esac
 done
-((${#APPS[@]})) || APPS=(crm shop)
+((${#APPS[@]})) || APPS=("${REGISTERED[@]}")
 
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-command -v gh >/dev/null 2>&1 || die "gh is not installed"
+(( DRY_RUN )) || command -v gh >/dev/null 2>&1 || die "gh is not installed"
 
 # fetch <repo> <path> <file> <ref>: the raw file, via the contents API.
 fetch() {
+  if (( DRY_RUN )); then printf '  would fetch %s@%s:%s → %s\n' "$1" "$4" "$2" "${3#"$ROOT"/}"; return 0; fi
   gh api -H 'Accept: application/vnd.github.raw' "repos/$1/contents/$2?ref=$4" >"$3" \
     || die "could not fetch $2 from $1 at $4"
   [[ -s "$3" ]] || die "$2 from $1 at $4 is empty"
 }
 
 for app in "${APPS[@]}"; do
-  if [[ "$app" == crm ]]; then repo=example-org/crm; else repo=example-org/shop; fi
+  fields=()
+  while IFS= read -r v; do fields+=("$v"); done < <(registry get "$app" repo redactedSqlPath \
+    database.caSource.repo database.caSource.path database.caSource.ref)
+  ((${#fields[@]} == 5)) || die "$app: apps.json entry incomplete"
+  repo="${fields[0]}" sql_path="${fields[1]}" ca_repo="${fields[2]}" ca_path="${fields[3]}" ca_ref="${fields[4]}"
   dir="$OUT/$app"
-  ca_ref="$REF"
-  if [[ "$app" == crm ]]; then ca_ref="${CRM_CA_REF:-$REF}"; else ca_ref="${SHOP_CA_REF:-$REF}"; fi
-  mkdir -p "$dir"
-  fetch "$repo" prisma/redacted/redacted-views.sql "$dir/redacted-views.sql" "$REF"
-  fetch "$repo" prisma/redacted/redacted-views-drop.sql "$dir/redacted-views-drop.sql" "$REF"
-  fetch "$repo" lib/database-ca.ts "$dir/database-ca.ts" "$ca_ref"
+  (( DRY_RUN )) || mkdir -p "$dir"
+  fetch "$repo" "$sql_path/redacted-views.sql" "$dir/redacted-views.sql" "$REF"
+  fetch "$repo" "$sql_path/redacted-views-drop.sql" "$dir/redacted-views-drop.sql" "$REF"
+  fetch "$ca_repo" "$ca_path" "$dir/ca-source" "$ca_ref"
+  if (( DRY_RUN )); then continue; fi
   # The PEM block of the instance certificate: the trust anchor the app's
-  # runtime verifies the server against (lib/database-connection.ts).
-  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$dir/database-ca.ts" >"$dir/ca.pem"
-  rm -f "$dir/database-ca.ts"
+  # runtime verifies the server against.
+  sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$dir/ca-source" >"$dir/ca.pem"
+  rm -f "$dir/ca-source"
   [[ "$(grep -c 'BEGIN CERTIFICATE' "$dir/ca.pem")" == 1 ]] \
-    || die "lib/database-ca.ts of $repo does not hold exactly one certificate"
+    || die "$ca_path of $ca_repo at $ca_ref does not hold exactly one certificate"
   grep -q 'GENERATED by hyde-db' "$dir/redacted-views.sql" \
-    || die "prisma/redacted/redacted-views.sql of $repo is not a hyde-db script"
-  printf 'ok   %s (%s@%s) → %s\n' "$app" "$repo" "$REF" "$dir"
+    || die "$sql_path/redacted-views.sql of $repo is not a hyde-db script"
+  printf 'ok   %s (%s@%s, CA %s@%s) → %s\n' "$app" "$repo" "$REF" "$ca_repo" "$ca_ref" "$dir"
 done
 
 next="bash scripts/wizard/redacted-reader.sh"
-if ((${#APPS[@]} == 1)); then next+=" --app ${APPS[0]}"; fi
+for app in "${APPS[@]}"; do next+=" --app $app"; done
 for app in "${APPS[@]}"; do next+=" ${OUT#"$ROOT"/}/$app/redacted-views.sql"; done
 printf '\nNext:\n  %s\n' "$next"

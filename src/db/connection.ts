@@ -1,9 +1,10 @@
-// Turns an app's `<APP>_REDACTED_URL` into mysql2 pool options, with the TLS
-// setup the apps' runtime uses: `ssl=true` verifies the server against the
-// instance CA, and the identity is checked against the certificate's only
-// name, the bare instance id (`servername`), since the certificate names
-// neither the endpoint host nor its address. The CA arrives as PEM text in
-// `<APP>_DATABASE_CA`, the name in `<APP>_DATABASE_CERT_NAME`.
+// Turns an app's `HYDE_APP_<NAME>_REDACTED_URL` into mysql2 pool options,
+// with the TLS setup the apps' runtime uses: `ssl=true` verifies the server
+// against the instance CA, and the identity is checked against the name the
+// instance certificate carries (`servername`) rather than the host, which the
+// certificate need not name. The CA arrives as PEM text in
+// `HYDE_APP_<NAME>_DATABASE_CA`; the name is the registry's
+// `database.certName`, or `HYDE_APP_<NAME>_CERT_NAME` (src/config.ts).
 //
 // Without `ssl=true` the connection is plain, for a local MySQL; production
 // refuses it. The pool always connects to database `redacted`, which holds
@@ -26,6 +27,8 @@ export interface DatabaseEnv {
   name: string;
   url: string;
   ca: string | undefined;
+  /** The CA's variable name, for error messages. */
+  caName?: string;
   certName: string | undefined;
   production: boolean;
 }
@@ -69,9 +72,8 @@ export function resolveDatabase(env: DatabaseEnv): DatabaseConfig {
     return base;
   }
 
-  const prefix = env.name.replace(/_REDACTED_URL$/, "");
-  if (!env.ca) refuse(`\`ssl=true\` needs the instance CA in ${prefix}_DATABASE_CA`);
-  if (!env.certName) refuse(`\`ssl=true\` needs the certificate name in ${prefix}_DATABASE_CERT_NAME`);
+  if (!env.ca) refuse(`\`ssl=true\` needs the instance CA in ${env.caName ?? "its CA variable"}`);
+  if (!env.certName) refuse("`ssl=true` needs the certificate name (apps.json `database.certName`)");
   if (IP_LITERAL.test(url.hostname)) refuse("TLS needs the endpoint's DNS name, not an address");
   return { ...base, tls: { ca: env.ca!, servername: env.certName! } };
 }

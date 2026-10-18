@@ -1,10 +1,9 @@
 # Production overlay. Deep-merged onto infra/base.yaml by
 # scripts/infra/config.ts. The only environment.
 #
-# Runtime variables are declared once, in infra/base.yaml `variables:`: an
-# overlay list would replace that list whole. Their production values come
-# from apply.env (README, Deploy). LOKI_STREAM_CRM / LOKI_STREAM_SHOP stay
-# unset here: src/config.ts defaults them to the apps' production containers.
+# Runtime variables are declared once, in infra/base.yaml `variables:` (the
+# per-app ones derived from apps.json): an overlay list would replace that
+# list whole. Their production values come from apply.env (README, Deploy).
 container:
   name: hyde-mcp-gateway
   # Scale to zero between sessions: the server holds no state and starts in

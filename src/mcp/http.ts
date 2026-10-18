@@ -8,7 +8,7 @@ import type { Config } from "../config.ts";
 import { authenticate } from "./auth.ts";
 import { createServer, type ServerOptions } from "./server.ts";
 
-export function createApp(config: Config, options: ServerOptions = {}) {
+export function createApp(config: Config, options: ServerOptions) {
   return createHttpServer(async (req, res) => {
     try {
       await route(req, res, config, options);

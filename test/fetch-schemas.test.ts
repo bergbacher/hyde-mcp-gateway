@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { fetchSchemas, LOG_SCHEMAS, parseArgs, REDACTED_SCHEMAS } from "../scripts/fetch-schemas.ts";
+import type { Registry } from "../src/registry.ts";
 import { redactedSchemaFile, schemaFile } from "../src/schemas.ts";
+import { REGISTRY, REGISTRY_WITH_THIRD } from "./helpers.ts";
 
 const FIXTURES = new URL("./fixtures/schemas/", import.meta.url);
 const dirs: string[] = [];
@@ -24,12 +26,12 @@ function github(files: Record<string, string>) {
   return { fetch, requests };
 }
 
-function run(kind: typeof LOG_SCHEMAS, argv: string[], files: Record<string, string>) {
+function run(kind: typeof LOG_SCHEMAS, argv: string[], files: Record<string, string>, registry: Registry = REGISTRY) {
   const dir = mkdtempSync(join(tmpdir(), "hyde-fetch-"));
   dirs.push(dir);
   const out: string[] = [];
   const { fetch, requests } = github(files);
-  const result = fetchSchemas(kind, { ...parseArgs(argv), dir, auth: "t", fetch, log: (l) => out.push(l), warn: (l) => out.push(l) });
+  const result = fetchSchemas(kind, { ...parseArgs(argv, registry), registry, dir, auth: "t", fetch, log: (l) => out.push(l), warn: (l) => out.push(l) });
   return result.then((r) => ({ ...r, dir, out: out.join("\n"), requests }));
 }
 
@@ -37,13 +39,19 @@ const shopLogs = readFileSync(new URL("shop.hyde-json.json", FIXTURES), "utf8");
 const crmLogs = readFileSync(new URL("crm.hyde-json.json", FIXTURES), "utf8");
 
 describe("parseArgs", () => {
-  it("defaults to every app, takes repeatable --app and --strict, refuses the rest", () => {
-    expect(parseArgs([])).toEqual({ apps: ["shop", "crm"], strict: false });
-    expect(parseArgs(["--app", "shop"])).toEqual({ apps: ["shop"], strict: false });
-    expect(parseArgs(["--app", "crm", "--app=shop", "--strict"])).toEqual({ apps: ["crm", "shop"], strict: true });
-    expect(() => parseArgs(["--app", "other"])).toThrow(/--app needs one of shop, crm, got other/);
-    expect(() => parseArgs(["--app"])).toThrow(/--app needs/);
-    expect(() => parseArgs(["shop"])).toThrow(/Unknown argument shop/);
+  it("defaults to every registered app, takes repeatable --app and --strict, refuses the rest", () => {
+    expect(parseArgs([], REGISTRY)).toEqual({ apps: ["shop", "crm"], strict: false });
+    expect(parseArgs(["--app", "shop"], REGISTRY)).toEqual({ apps: ["shop"], strict: false });
+    expect(parseArgs(["--app", "crm", "--app=shop", "--strict"], REGISTRY)).toEqual({ apps: ["crm", "shop"], strict: true });
+    expect(() => parseArgs(["--app", "other"], REGISTRY)).toThrow(/--app needs one of shop, crm, got other/);
+    expect(() => parseArgs(["--app"], REGISTRY)).toThrow(/--app needs/);
+    expect(() => parseArgs(["shop"], REGISTRY)).toThrow(/Unknown argument shop/);
+  });
+
+  it("knows the apps of the registry it is given", () => {
+    expect(parseArgs([], REGISTRY_WITH_THIRD).apps).toEqual(["shop", "crm", "help-desk"]);
+    expect(parseArgs(["--app", "help-desk"], REGISTRY_WITH_THIRD).apps).toEqual(["help-desk"]);
+    expect(() => parseArgs(["--app", "help-desk"], REGISTRY)).toThrow(/got help-desk/);
   });
 });
 
@@ -101,7 +109,22 @@ describe("pnpm fetch:redacted-schemas (D37)", () => {
     });
     expect(r).toMatchObject({ written: ["shop"], exitCode: 0 });
     expect(readFileSync(redactedSchemaFile("shop", r.dir), "utf8")).toBe("# shop redacted schema\n");
-    expect(r.out).toMatch(/crm not written: .*redacted-schema\.md is empty/);
+    expect(r.out).toMatch(/crm not written: .*redacted-schema\.md: the file is empty/);
     expect(r.requests.every((u) => u.endsWith("?ref=main"))).toBe(true);
+  });
+});
+
+describe("a third app in apps.json", () => {
+  it("--app fetches it from the repo and paths its entry names", async () => {
+    const third = REGISTRY_WITH_THIRD.apps.get("help-desk")!;
+    const logs = JSON.stringify({ app: "help-desk", fields: { action: "visible" } });
+    const r = await run(LOG_SCHEMAS, ["--app", "help-desk", "--strict"], { [`${third.repo}:${third.logSchemaPath}`]: logs }, REGISTRY_WITH_THIRD);
+    expect(r).toMatchObject({ written: ["help-desk"], failed: [], exitCode: 0 });
+    expect(r.requests).toEqual([`https://api.github.com/repos/${third.repo}/contents/${third.logSchemaPath}?ref=main`]);
+    expect(readFileSync(schemaFile("help-desk", r.dir), "utf8")).toBe(`${logs}\n`);
+
+    const redacted = await run(REDACTED_SCHEMAS, ["--app", "help-desk"], { [`${third.repo}:${third.redactedSchemaPath}`]: "# help-desk" }, REGISTRY_WITH_THIRD);
+    expect(redacted).toMatchObject({ written: ["help-desk"], exitCode: 0 });
+    expect(redacted.requests).toEqual([`https://api.github.com/repos/${third.repo}/contents/${third.redactedSchemaPath}?ref=main`]);
   });
 });

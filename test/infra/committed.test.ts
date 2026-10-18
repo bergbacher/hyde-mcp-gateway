@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../../scripts/infra/config.ts";
+import { appVariableSpecs, loadConfig } from "../../scripts/infra/config.ts";
+import { appNames, appVariables, loadRegistry } from "../../src/registry.ts";
 
 const root = path.resolve(import.meta.dirname, "..", "..");
 const read = (file: string) => fs.readFileSync(path.join(root, file), "utf8");
@@ -23,28 +24,42 @@ describe("committed infra/", () => {
     });
   });
 
-  it("declares exactly the runtime values the server reads, with their flags", () => {
+  // Derived from apps.json, never listed by hand (D38).
+  const registry = loadRegistry();
+  const perApp = Object.fromEntries(appNames(registry).flatMap((app) => {
+    const vars = appVariables(app);
+    return [[vars.redactedUrl, { required: false, secret: true }], [vars.databaseCa, { required: false, secret: true }]];
+  }));
+
+  it("declares exactly the runtime values the server reads, with their flags: the global ones and each app's from apps.json", () => {
     const flags = (required: boolean, secret: boolean) => ({ required, secret });
     expect(Object.fromEntries(config.variables.map(({ name, required, secret }) => [name, flags(required, secret)]))).toEqual({
       COCKPIT_LOGS_URL: flags(true, false),
       COCKPIT_LOGS_READ_TOKEN: flags(true, true),
-      LOKI_STREAM_CRM: flags(false, false),
-      LOKI_STREAM_SHOP: flags(false, false),
-      CRM_REDACTED_URL: flags(true, true),
-      SHOP_REDACTED_URL: flags(true, true),
-      CRM_DATABASE_CA: flags(true, true),
-      SHOP_DATABASE_CA: flags(true, true),
-      CRM_DATABASE_CERT_NAME: flags(true, false),
-      SHOP_DATABASE_CERT_NAME: flags(true, false),
       HYDE_TOKEN_CLAUDE_CODE: flags(true, true),
       HYDE_TOKEN_AGENT: flags(true, true),
+      ...perApp,
     });
     expect(new Set(config.variables.map((v) => v.name)).size).toBe(config.variables.length);
   });
 
-  it("README's apply.env table lists every declared variable", () => {
+  it("infra/base.yaml lists no per-app variable and names no app", () => {
+    const base = read("infra/base.yaml");
+    expect(base).not.toMatch(/name: HYDE_APP_/);
+    for (const app of appNames(registry)) expect(base).not.toMatch(new RegExp(`name: ${app.toUpperCase()}_`));
+    expect(config.variables.filter((v) => v.app)).toEqual(appVariableSpecs(registry));
+  });
+
+  it("README's apply.env table lists every declared variable, each app's included", () => {
     const readme = read("README.md");
-    for (const { name } of config.variables) expect(readme).toContain(`| \`${name}\``);
+    const table = readme.slice(readme.indexOf("### apply.env"), readme.indexOf("### Deploy workflow"));
+    for (const { name } of config.variables) expect(table).toContain(`| \`${name}\``);
+    // And no variable the server no longer reads.
+    for (const old of table.matchAll(/\| `((?:[A-Z]+_)+[A-Z]+)`/g)) {
+      const name = old[1]!;
+      const known = config.variables.some((v) => v.name === name) || ["HYDE_IMAGE_TAG", "SCW_ACCESS_KEY"].includes(name);
+      expect(known, `${name} in the apply.env table is not a declared variable`).toBe(true);
+    }
   });
 
   it("refuses an environment without an overlay", () => {
@@ -61,20 +76,21 @@ describe("Dockerfile", () => {
     expect(dockerfile).toMatch(/pnpm install --frozen-lockfile --prod/);
   });
 
-  it("copies the fetched schemas/ into the image", () => {
-    expect(read(".dockerignore").split("\n").some((line) => /^!?schemas/.test(line.trim()))).toBe(false);
+  it("copies apps.json and the fetched schemas/ into the image", () => {
+    expect(read(".dockerignore").split("\n").some((line) => /^!?(schemas|apps\.json)/.test(line.trim()))).toBe(false);
     expect(dockerfile).toMatch(/^COPY \. \.$/m);
   });
 
   // The schema check, run with sh in a scratch directory per case (D37).
   const check = (() => {
     const lines = dockerfile.split("\n");
-    const start = lines.findIndex((l) => l.startsWith("RUN ready="));
+    const start = lines.findIndex((l) => l.startsWith("RUN test -s apps.json"));
     const end = lines.findIndex((l, i) => i >= start && !l.endsWith("\\"));
     return lines.slice(start, end + 1).join("\n").replace(/^RUN /, "").replaceAll("\\\n", "\n");
   })();
-  const build = (files: string[]) => {
+  const build = (files: string[], registry: string | null = read("apps.json")) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hyde-docker-"));
+    if (registry !== null) fs.writeFileSync(path.join(dir, "apps.json"), registry);
     fs.mkdirSync(path.join(dir, "schemas"));
     for (const file of files) fs.writeFileSync(path.join(dir, "schemas", file), "x\n");
     const run = spawnSync("sh", ["-c", check], { cwd: dir, encoding: "utf8" });
@@ -90,6 +106,16 @@ describe("Dockerfile", () => {
     const both = build(["shop.hyde-json.json", "shop.redacted-schema.md", "crm.hyde-json.json", "crm.redacted-schema.md"]);
     expect(both).toMatchObject({ status: 0 });
     expect(both.out).toMatch(/apps with schemas: shop crm/);
+  });
+
+  it("takes the apps from apps.json", () => {
+    const third = JSON.stringify({ apps: { "help-desk": {} } });
+    const helpdesk = build(["help-desk.hyde-json.json", "help-desk.redacted-schema.md"], third);
+    expect(helpdesk.status).toBe(0);
+    expect(helpdesk.out).toMatch(/apps with schemas: help-desk\n/);
+    // shop's pair is no use when apps.json does not register shop.
+    expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], third).status).not.toBe(0);
+    expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], null).out).toMatch(/apps\.json is missing/);
   });
 
   it("refuses to build when no app has its complete pair", () => {

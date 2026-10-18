@@ -189,20 +189,20 @@ finish() {
 # Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 #
-# redacted_reader on both RDB instances (LEDGER D2, D18, D19). For crm,
-# then shop: admin connection → drop and apply the hyde-db views → reader
-# password and unlock → verify as the reader → <APP>_REDACTED_URL into
-# apply.env (gitignored).
+# redacted_reader on each registered app's RDB instance (LEDGER D2, D18,
+# D19, D38). Per app, in apps.json order: admin connection → drop and apply
+# the hyde-db views → reader password and unlock → verify as the reader →
+# HYDE_APP_<NAME>_REDACTED_URL into apply.env (gitignored). Host, port and
+# source database are offered from the app's apps.json entry (read through
+# scripts/registry.ts; HYDE_APPS_FILE points at another registry).
 #
-#   bash scripts/wizard/fetch-redacted-sql.sh [--app shop|crm]...
-#   bash scripts/wizard/redacted-reader.sh [--dry-run] [--app shop|crm]... \
-#     [.redacted-sql/crm/redacted-views.sql] [.redacted-sql/shop/redacted-views.sql]
+#   bash scripts/wizard/fetch-redacted-sql.sh [--app <name>]...
+#   bash scripts/wizard/redacted-reader.sh [--dry-run] [--app <name>]... [<redacted-views.sql>]...
 #
-# --app (repeatable) configures only that app (D37); without it, both. The
-# SQL paths are one per selected app, in the order crm, shop; omitted,
-# they default to .redacted-sql/<app>/redacted-views.sql. With one app
-# selected, two paths (crm's, shop's) are also accepted and the other
-# app's is ignored.
+# --app (repeatable) configures only those apps (D37); without it, every app
+# in apps.json. The selected apps run in the order given, or in apps.json
+# order without --app. The SQL paths are one per selected app, in that
+# order; omitted, they default to .redacted-sql/<app>/redacted-views.sql.
 #
 # Beside each redacted-views.sql must lie redacted-views-drop.sql and ca.pem,
 # the instance CA; fetch-redacted-sql.sh puts them there. --dry-run asks
@@ -213,55 +213,49 @@ finish() {
 # mysql on stdin, credentials sit in mode-600 option files in a private temp
 # directory removed on exit, and the reader's password is written only to
 # apply.env. Re-runnable: every step is idempotent, the apply step is always
-# drop then apply, and an existing <APP>_REDACTED_URL keeps its password
+# drop then apply, and an existing HYDE_APP_<NAME>_REDACTED_URL keeps its password
 # unless you rotate. Runbook: docs/runbooks/redacted-reader.md.
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_FILE="${APPLY_ENV:-$ROOT/apply.env}"
 # VERIFY_CA checks the chain against the app's instance CA, not the host
-# name: neither instance certificate names the host we connect to in a way
-# every client accepts (crm's names only the instance id).
+# name: an instance certificate need not name the host we connect to in a
+# way every client accepts (some name only the instance id; apps.json
+# database.certName holds the name each carries).
 SSL_MODE="${MYSQL_SSL_MODE:-VERIFY_CA}"
 READER=redacted_reader
 VIEWS_DB=redacted
 DRY_RUN=0
 
+registry() { node "$ROOT/scripts/registry.ts" "$@"; }
+REGISTERED=()
+while IFS= read -r name; do REGISTERED+=("$name"); done < <(registry names)
+if ((${#REGISTERED[@]} == 0)); then printf 'error: apps.json registers no app or is invalid\n' >&2; exit 1; fi
+
 usage() {
-  printf 'usage: %s [--dry-run] [--app crm|shop]... [<crm redacted-views.sql>] [<shop redacted-views.sql>]\n' "$0" >&2
+  printf 'usage: %s [--dry-run] [--app <name>]... [<redacted-views.sql>]...\n' "$0" >&2
+  printf '       apps: %s\n' "${REGISTERED[*]}" >&2
   printf '       one path per selected app, default .redacted-sql/<app>/redacted-views.sql;\n' >&2
-  printf '       fetch them with scripts/wizard/fetch-redacted-sql.sh [--app <app>]\n' >&2
+  printf '       fetch them with scripts/wizard/fetch-redacted-sql.sh [--app <name>]\n' >&2
   exit 2
 }
-WANT_CRM=0 WANT_SHOP=0 PATHS=()
+APPS=() PATHS=()
 while (($#)); do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --app)
-      case "${2:-}" in
-        crm) WANT_CRM=1 ;;
-        shop) WANT_SHOP=1 ;;
-        *) usage ;;
-      esac
+      if [[ -z "${2:-}" || " ${REGISTERED[*]} " != *" $2 "* ]]; then usage; fi
+      [[ " ${APPS[*]-} " == *" $2 "* ]] || APPS+=("$2")
       shift 2 ;;
     -*) usage ;;
     *) PATHS+=("$1"); shift ;;
   esac
 done
-if (( ! WANT_CRM && ! WANT_SHOP )); then WANT_CRM=1 WANT_SHOP=1; fi
-# The selected apps, always crm before shop.
-APPS=()
-if (( WANT_CRM )); then APPS+=(crm); fi
-if (( WANT_SHOP )); then APPS+=(shop); fi
-CRM_SQL="$ROOT/.redacted-sql/crm/redacted-views.sql"
-SHOP_SQL="$ROOT/.redacted-sql/shop/redacted-views.sql"
-case "${#PATHS[@]}" in
-  0) ;;
-  2) CRM_SQL="${PATHS[0]}" SHOP_SQL="${PATHS[1]}" ;;
-  1)
-    ((${#APPS[@]} == 1)) || usage
-    if [[ "${APPS[0]}" == crm ]]; then CRM_SQL="${PATHS[0]}"; else SHOP_SQL="${PATHS[0]}"; fi ;;
-  *) usage ;;
-esac
+((${#APPS[@]})) || APPS=("${REGISTERED[@]}")
+if ((${#PATHS[@]} != 0 && ${#PATHS[@]} != ${#APPS[@]})); then usage; fi
+
+# ident APP: the app name as a shell identifier part (`-` → `_`).
+ident() { printf '%s' "${1//-/_}"; }
 
 # Preconditions, then five stages per app.
 TOTAL_STAGES=$((1 + 5 * ${#APPS[@]}))
@@ -350,11 +344,12 @@ app_files() {
   re="VIEW \`$VIEWS_DB\`\\.\`([^\`]+)\` \\([^']* FROM \`([^\`]+)\`;"
   line="$(grep -m1 -E "$re" "$sql")" || die "$app: no view in $sql"
   [[ "$line" =~ $re ]] || die "$app: cannot read the first view of $sql"
-  printf -v "${app}_VIEW" '%s' "${BASH_REMATCH[1]}"
-  printf -v "${app}_TABLE" '%s' "${BASH_REMATCH[2]}"
-  printf -v "${app}_VIEWS" '%s' "$(grep -cE "VIEW \`$VIEWS_DB\`\\.\`[^\`]+\` \\(" "$sql")"
-  printf -v "${app}_DIR" '%s' "$dir"
-  printf -v "${app}_APPLY" '%s' "$dir/$(basename "$sql")"
+  local id; id="$(ident "$app")"
+  printf -v "A_${id}_VIEW" '%s' "${BASH_REMATCH[1]}"
+  printf -v "A_${id}_TABLE" '%s' "${BASH_REMATCH[2]}"
+  printf -v "A_${id}_VIEWS" '%s' "$(grep -cE "VIEW \`$VIEWS_DB\`\\.\`[^\`]+\` \\(" "$sql")"
+  printf -v "A_${id}_DIR" '%s' "$dir"
+  printf -v "A_${id}_APPLY" '%s' "$dir/$(basename "$sql")"
 }
 
 # ask_default VAR PROMPT DEFAULT: visible input, Enter keeps DEFAULT. A dry
@@ -366,26 +361,25 @@ ask_default() {
   printf -v "$1" '%s' "${input:-$3}"
 }
 
-# Per app, filled by app_files through printf -v.
-crm_VIEW="" crm_TABLE="" crm_VIEWS="" crm_DIR="" crm_APPLY=""
-shop_VIEW="" shop_TABLE="" shop_VIEWS="" shop_DIR="" shop_APPLY=""
+# Per app, A_<ident>_{VIEW,TABLE,VIEWS,DIR,APPLY}, filled by app_files through printf -v.
+
+# app_var APP FIELD: the value app_files stored for APP.
+app_var() { local v; v="A_$(ident "$1")_$2"; printf '%s' "${!v-}"; }
 
 # The app now being configured. Set by select_app.
 APP="" KEY="" HOST="" PORT="" DB="" CA="" ADMIN_USER="" ADMIN_PW="" READER_PW=""
 VIEW="" TABLE="" VIEWS="" APPLY="" DROP="" VERIFIED=0
 
+# select_app APP: the app's defaults from apps.json and its files.
 select_app() {
   APP="$1"
-  case "$APP" in
-    crm)
-      KEY=CRM_REDACTED_URL
-      HOST=rw-0001.example.invalid PORT=3307 DB=crm-prod
-      VIEW="$crm_VIEW" TABLE="$crm_TABLE" VIEWS="$crm_VIEWS" APPLY="$crm_APPLY" CA="$crm_DIR/ca.pem" ;;
-    shop)
-      KEY=SHOP_REDACTED_URL
-      HOST=rw-0000.example.invalid PORT=3306 DB=shop
-      VIEW="$shop_VIEW" TABLE="$shop_TABLE" VIEWS="$shop_VIEWS" APPLY="$shop_APPLY" CA="$shop_DIR/ca.pem" ;;
-  esac
+  local fields=() v
+  while IFS= read -r v; do fields+=("$v"); done < <(registry get "$APP" database.host database.port database.sourceDatabase)
+  ((${#fields[@]} == 3)) || die "$APP: apps.json has no database host, port and sourceDatabase"
+  HOST="${fields[0]}" PORT="${fields[1]}" DB="${fields[2]}"
+  KEY="$(registry env "$APP" redactedUrl)" || die "$APP: no variable name"
+  VIEW="$(app_var "$APP" VIEW)" TABLE="$(app_var "$APP" TABLE)" VIEWS="$(app_var "$APP" VIEWS)"
+  APPLY="$(app_var "$APP" APPLY)" CA="$(app_var "$APP" DIR)/ca.pem"
   DROP="$(dirname "$APPLY")/redacted-views-drop.sql"
   ADMIN_USER="" ADMIN_PW="" READER_PW="" VERIFIED=0
 }
@@ -418,21 +412,18 @@ reader_url() { printf 'mysql://%s:%s@%s:%s/%s?ssl=true' "$READER" "$READER_PW" "
 # A dry run waits for nobody.
 if (( DRY_RUN )); then pause() { :; }; fi
 
-if ((${#APPS[@]} == 2)); then banner "redacted_reader on crm and shop"; else banner "redacted_reader on ${APPS[0]}"; fi
+banner "redacted_reader on ${APPS[*]}"
 if (( DRY_RUN )); then warn "dry run: nothing is asked, run or written"; fi
 
 stage "Preconditions"
 say "Runs on your machine. For each app you need an admin account on its RDB"
 say "instance that can create users, views and grants and read mysql.*."
-if (( WANT_CRM )); then
-  app_files crm "$CRM_SQL"
-  say "${GREEN}✓${RESET} crm: $crm_VIEWS views, first \`$VIEWS_DB\`.\`$crm_VIEW\` from \`$crm_TABLE\`"
-fi
-if (( WANT_SHOP )); then
-  app_files shop "$SHOP_SQL"
-  say "${GREEN}✓${RESET} shop: $shop_VIEWS views, first \`$VIEWS_DB\`.\`$shop_VIEW\` from \`$shop_TABLE\`"
-fi
-if ((${#APPS[@]} == 1)); then note "Only ${APPS[0]} (--app); the other app is left as it is."; fi
+for i in "${!APPS[@]}"; do
+  app="${APPS[$i]}"
+  app_files "$app" "${PATHS[$i]:-$ROOT/.redacted-sql/$app/redacted-views.sql}"
+  say "${GREEN}✓${RESET} $app: $(app_var "$app" VIEWS) views, first \`$VIEWS_DB\`.\`$(app_var "$app" VIEW)\` from \`$(app_var "$app" TABLE)\`"
+done
+if ((${#APPS[@]} < ${#REGISTERED[@]})); then note "Only ${APPS[*]} (--app); the other apps are left as they are."; fi
 if ! command -v mysql >/dev/null 2>&1; then
   if (( DRY_RUN )); then warn "mysql client not found (fine for a dry run)"; else die "install the MySQL client: brew install mysql-client"; fi
 elif mysql --version 2>/dev/null | grep -qi mariadb; then

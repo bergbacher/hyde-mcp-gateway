@@ -15,16 +15,19 @@ RUN corepack enable
 # its members' manifests to install from the root lockfile. .dockerignore
 # keeps node_modules, apply.env and .env* out of the context.
 #
-# The tree includes schemas/, which is not committed: `pnpm schemas` (log field
+# The tree includes apps.json, the app registry the server reads at startup
+# (D38), and schemas/, which is not committed: `pnpm schemas` (log field
 # schemas) and `pnpm fetch:redacted-schemas` (redacted-schema.md) fill it from
 # the app repos' main before the build (deploy.yml; README, First deploy). The
-# server reads it at startup and serves the apps whose files are present
-# (D37); an app without them is refused at its tools. An image that could
-# serve no app is useless, so the build stops unless at least one app has its
+# server serves the registered apps whose files are present (D37); an app
+# without them is refused at its tools. An image that could serve no app is
+# useless, so the build stops unless at least one app in apps.json has its
 # complete pair: schemas/<app>.hyde-json.json and schemas/<app>.redacted-schema.md.
 COPY . .
-RUN ready=""; \
-    for app in shop crm; do \
+RUN test -s apps.json || { echo "apps.json is missing: the server cannot start without its app registry" >&2; exit 1; }; \
+    apps=$(node -e 'console.log(Object.keys(JSON.parse(require("fs").readFileSync("apps.json", "utf8")).apps).join(" "))') || { echo "apps.json is not a registry" >&2; exit 1; }; \
+    ready=""; \
+    for app in $apps; do \
       if test -s "schemas/$app.hyde-json.json" && test -s "schemas/$app.redacted-schema.md"; then ready="$ready $app"; \
       else echo "warning: $app is not configured: schemas/$app.hyde-json.json or schemas/$app.redacted-schema.md is missing" >&2; fi; \
     done; \
