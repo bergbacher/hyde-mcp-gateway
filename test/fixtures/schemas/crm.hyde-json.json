@@ -1,0 +1,11 @@
+{
+  "app": "crm",
+  "passIds": true,
+  "fields": {
+    "action": "visible",
+    "error": "visible",
+    "message": "text",
+    "message.workspaceId": "visible",
+    "message.email": "hidden"
+  }
+}

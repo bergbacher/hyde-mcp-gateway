@@ -8,11 +8,13 @@
   "scripts": {
     "dev": "node src/mcp/main.ts",
     "start": "node src/mcp/main.ts",
+    "schemas": "node scripts/fetch-log-schemas.ts",
     "test": "vitest run",
     "typecheck": "tsc"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "hyde-json": "workspace:*",
     "zod": "^4.6.5"
   },
   "devDependencies": {

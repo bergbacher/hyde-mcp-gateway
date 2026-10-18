@@ -1,0 +1,11 @@
+{
+  "app": "shop",
+  "passIds": true,
+  "fields": {
+    "action": "visible",
+    "error": "visible",
+    "message": "text",
+    "message.memberId": "visible",
+    "message.to": "hidden"
+  }
+}
