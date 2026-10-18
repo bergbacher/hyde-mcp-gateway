@@ -6,7 +6,8 @@ import { loadEdgeSchema, loadRedactedSchemas, loadSchemas } from "../schemas.ts"
 import { buildLogSources } from "../sources/index.ts";
 import { scopeOf } from "./auth.ts";
 import { createApp } from "./http.ts";
-import { sqlMissing, toolNames, type ServerOptions } from "./server.ts";
+import { toolNames, type ServerOptions } from "./server.ts";
+import { sqlMissing } from "./sql.ts";
 
 // The apps every tool accepts (apps.json, D38). An invalid registry stops the start.
 const registry = loadRegistry();
