@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { guardStatement } from "../src/db/guard.ts";
-import { clampLimit } from "../src/engine/query.ts";
+import { clampLimit } from "../src/db/pool.ts";
 
 const ok = (sql: string) => {
   const r = guardStatement(sql);

@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { resolveDatabase } from "../src/db/connection.ts";
 import { createDatabases } from "../src/db/pool.ts";
-import { runQuery } from "../src/engine/query.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { connectInMemory, textOf } from "./helpers.ts";
 
 const URL_ = process.env.HYDE_TEST_MYSQL_URL;
@@ -13,13 +13,13 @@ const CA_FILE = process.env.HYDE_TEST_MYSQL_CA_FILE;
 const CERT_NAME = process.env.HYDE_TEST_MYSQL_CERT_NAME;
 
 describe.skipIf(!URL_)("query_sql against MySQL", () => {
-  const databases = createDatabases(
-    new Map(URL_ ? [["crm", resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: URL_, ca: undefined, certName: undefined, production: false })]] : []),
-  );
+  const crm = () =>
+    new Map(URL_ ? [["crm", resolveDatabase({ name: "HYDE_TEST_MYSQL_URL", url: URL_, ca: undefined, certName: undefined, production: false })]] : []);
+  const databases = createDatabases(crm());
   afterAll(() => databases.close());
 
   async function call(sql: string, limit?: number) {
-    const client = await connectInMemory({ sql: { databases, schemas: new Map([["crm", "# crm\n"]]) } });
+    const client = await connectInMemory({ sql: sqlReadiness({ databases, schemas: new Map([["crm", "# crm\n"]]) }) });
     const result = await client.callTool({ name: "query_sql", arguments: { app: "crm", sql, limit } });
     await client.close();
     return result;
@@ -46,8 +46,9 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
   });
 
   it("caps the result size", async () => {
-    const conn = await databases.connect("crm");
-    const result = await runQuery(conn, "SELECT id, REPEAT('x', 100) FROM users ORDER BY id", { limit: 1000, maxBytes: 400 });
+    const small = createDatabases(crm(), { timeoutMs: 15_000, maxBytes: 400 });
+    const result = await small.query("crm", "SELECT id, REPEAT('x', 100) FROM users ORDER BY id", 1000);
+    await small.close();
     expect(result.rows.length).toBeGreaterThan(0);
     expect(result.rows.length).toBeLessThan(10);
     expect(result.truncated).toBe(true);
@@ -63,11 +64,12 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
   });
 
   it("cancels a query running past the timeout", async () => {
-    const conn = await databases.connect("crm");
     const slow = "SELECT a.id FROM users a, users b, users c, users d, users e, users f, users g, users h ORDER BY RAND() LIMIT 1";
-    await expect(runQuery(conn, slow, { limit: 10, timeoutMs: 300 })).rejects.toThrow(/maximum statement execution time exceeded/);
+    const hasty = createDatabases(crm(), { timeoutMs: 300, maxBytes: 1_000_000 });
+    await expect(hasty.query("crm", slow, 10)).rejects.toThrow(/maximum statement execution time exceeded/);
     // The pool still serves the next query.
-    expect((await call("SELECT 1 AS one")).isError).toBeFalsy();
+    expect(await hasty.query("crm", "SELECT 1 AS one", 1)).toEqual({ columns: ["one"], rows: [["1"]], truncated: false }); // BIGINT as a string
+    await hasty.close();
   });
 
   describe.skipIf(!CA_FILE || !CERT_NAME)("over TLS", () => {
@@ -84,14 +86,14 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
 
     it("connects when the certificate carries the name", async () => {
       const dbs = tls(CERT_NAME!);
-      const result = await runQuery(await dbs.connect("crm"), "SELECT id FROM users ORDER BY id LIMIT 1", { limit: 1 });
+      const result = await dbs.query("crm", "SELECT id FROM users ORDER BY id LIMIT 1", 1);
       expect(result.rows).toEqual([[1]]);
       await dbs.close();
     });
 
     it("refuses a certificate that does not carry the name", async () => {
       const dbs = tls("some-other-instance");
-      await expect(dbs.connect("crm")).rejects.toThrow(/does not match some-other-instance/);
+      await expect(dbs.query("crm", "SELECT 1", 1)).rejects.toThrow(/does not match some-other-instance/);
       await dbs.close();
     });
   });

@@ -3,13 +3,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/mcp/http.ts";
-import { logSources, readConfig } from "../src/config.ts";
+import { readConfig } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import type { Loki } from "../src/loki.ts";
 import type { TokenVerifier } from "../src/mcp/auth.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { readFileSync } from "node:fs";
 import { parseSchema } from "hyde-json";
 import type { Schemas } from "../src/schemas.ts";
+import { buildLogSources } from "../src/sources/index.ts";
 import { REGISTRY } from "./helpers.ts";
 
 const TOKEN = "t".repeat(40);
@@ -148,17 +150,16 @@ describe("http with GitHub tokens (D59)", () => {
   };
   const databases: Databases = {
     has: () => true,
-    connect: (app) => { touched.push(`db:${app}`); return Promise.reject(new Error("reached the database")); },
+    query: (app) => { touched.push(`db:${app}`); return Promise.reject(new Error("reached the database")); },
     close: async () => {},
   };
   const app = createApp(config, {
     registry: REGISTRY,
     logs: {
-      schemas: fixtureSchemas(),
+      sources: buildLogSources({ registry: REGISTRY, schemas: fixtureSchemas(), env: {} }),
       loki,
-      sources: logSources(REGISTRY),
     },
-    sql: { databases, schemas: new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]) },
+    sql: sqlReadiness({ databases, schemas: new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]) }),
     github: { fetch: github, now: () => clock },
   });
   let base: string;

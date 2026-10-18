@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Databases } from "../src/db/pool.ts";
 import type { Principal } from "../src/mcp/auth.ts";
 import { createServer, type ServerOptions } from "../src/mcp/server.ts";
 import { EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry, type Registry } from "../src/registry.ts";
@@ -44,7 +45,7 @@ export async function connectInMemory(
 ) {
   const { principal = ALL_APPS, ...rest } = options;
   const [a, b] = InMemoryTransport.createLinkedPair();
-  await createServer(principal, { registry: REGISTRY, ...rest }).connect(a);
+  await createServer(principal, { registry: REGISTRY, ...rest }).server.connect(a);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(b);
   return client;
@@ -53,3 +54,11 @@ export async function connectInMemory(
 export function textOf(result: unknown): string {
   return (result as { content: { text: string }[] }).content[0]!.text;
 }
+
+/** A database whose only behaviour is `query`; every app is configured. */
+export function answering(query: Databases["query"]): Databases {
+  return { has: () => true, query, close: async () => {} };
+}
+
+/** A database that fails the test if anything reaches it. */
+export const untouchable: Databases = answering(() => Promise.reject(new Error("reached the database")));

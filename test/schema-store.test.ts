@@ -4,12 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { logSources } from "../src/config.ts";
-import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { DEFAULT_REFRESH_SECONDS, readSchemaStoreConfig, SchemaStore, type SchemaStoreOptions } from "../src/schema-store.ts";
 import { redactedSchemaFile, schemaFile } from "../src/schemas.ts";
-import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, textOf } from "./helpers.ts";
+import { buildLogSources } from "../src/sources/index.ts";
+import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, textOf, untouchable } from "./helpers.ts";
 
 const FIXTURES = new URL("./fixtures/schemas/", import.meta.url);
 const shopLogs = readFileSync(new URL("shop.hyde-json.json", FIXTURES), "utf8");
@@ -156,8 +156,8 @@ describe("SchemaStore with a token (GitHub)", () => {
     expect(crm!.message).not.toMatch(/keeping/);
 
     const client = await connectInMemory({
-      logs: { schemas: s.logSchemas, loki: createLoki({ url: "https://loki.invalid", token: "t", fetch: () => Promise.reject(new Error("reached Loki")) }), sources: logSources(REGISTRY) },
-      sql: { databases: untouchable, schemas: s.redactedSchemas },
+      logs: { sources: buildLogSources({ registry: REGISTRY, schemas: s.logSchemas, env: {} }), loki: createLoki({ url: "https://loki.invalid", token: "t", fetch: () => Promise.reject(new Error("reached Loki")) }) },
+      sql: sqlReadiness({ databases: untouchable, schemas: s.redactedSchemas }),
     });
     const logs = await client.callTool({ name: "query_logs", arguments: { app: "crm" } });
     expect(logs.isError).toBe(true);
@@ -183,7 +183,7 @@ describe("SchemaStore with a token (GitHub)", () => {
         return Response.json({ status: "success", data: { resultType: "vector", result: [{ metric: {}, value: [0, "1"] }] } });
       }) as typeof globalThis.fetch,
     });
-    const client = await connectInMemory({ logs: { schemas: s.logSchemas, loki, sources: logSources(REGISTRY) } });
+    const client = await connectInMemory({ logs: { sources: buildLogSources({ registry: REGISTRY, schemas: s.logSchemas, env: {} }), loki } });
     const read = async () => JSON.stringify(JSON.parse(textOf(await client.callTool({ name: "query_logs", arguments: { app: "shop" } }))));
     expect(await read()).not.toContain("jane.doe@example.com");
     gh.state.files = { ...allFiles(), [SHOP_LOG]: JSON.stringify({ app: "shop", fields: { action: "visible", level: "visible", "message.to": "visible" } }) };
@@ -235,10 +235,3 @@ describe("SchemaStore without a token (developer mode)", () => {
     expect(s.logSchemas.size + s.redactedSchemas.size).toBe(0);
   });
 });
-
-/** A database that fails the test if anything reaches it. */
-const untouchable: Databases = {
-  has: () => true,
-  connect: () => Promise.reject(new Error("reached the database")),
-  close: async () => {},
-};
