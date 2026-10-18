@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseSchema } from "hyde-json";
 import { query } from "../scripts/registry.ts";
-import { readConfig, readLokiConfig } from "../src/config.ts";
+import { readConfig } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
+import { buildLogSources } from "../src/sources/index.ts";
 import { appNames, appVariables, envPrefix, EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry } from "../src/registry.ts";
 import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP } from "./helpers.ts";
 
@@ -104,16 +105,15 @@ describe("env prefix", () => {
   it("the old per-app variables are not read", () => {
     const env = { ...TOKEN, SHOP_REDACTED_URL: "mysql://r:x@localhost/redacted", CRM_REDACTED_URL: "mysql://r:x@localhost/redacted" };
     expect(readConfig(REGISTRY, env).databases.size).toBe(0);
-    const loki = { COCKPIT_LOGS_URL: "https://l.test", COCKPIT_LOGS_READ_TOKEN: "t", LOKI_STREAM_SHOP: '{a="b"}' };
-    expect(readLokiConfig(REGISTRY, loki).sources.get("shop")?.stream).toBe(REGISTRY.apps.get("shop")!.loki.stream);
+    const sources = buildLogSources({ registry: REGISTRY, schemas: new Map(), env: { LOKI_STREAM_SHOP: '{a="b"}' } });
+    expect(sources.streams("shop").app).toBe(REGISTRY.apps.get("shop")!.loki.stream);
   });
 
-  it("readLokiConfig takes the stream and service from apps.json and the stream override from the prefix", () => {
-    const env = { COCKPIT_LOGS_URL: "https://l.test", COCKPIT_LOGS_READ_TOKEN: "t" };
-    expect(readLokiConfig(REGISTRY_WITH_THIRD, env).sources.get("help-desk")).toEqual(THIRD_APP.loki);
-    const custom = readLokiConfig(REGISTRY_WITH_THIRD, { ...env, HYDE_APP_HELP_DESK_LOKI_STREAM: '{resource_name="x"}' });
-    expect(custom.sources.get("help-desk")).toEqual({ stream: '{resource_name="x"}', service: "help-desk" });
-    expect(() => readLokiConfig(REGISTRY_WITH_THIRD, { ...env, HYDE_APP_HELP_DESK_LOKI_STREAM: "{a} | x" }))
+  it("the log sources take the stream from apps.json and the stream override from the prefix", () => {
+    const build = (env: NodeJS.ProcessEnv) => buildLogSources({ registry: REGISTRY_WITH_THIRD, schemas: new Map(), env });
+    expect(build({}).streams("help-desk")).toEqual({ app: THIRD_APP.loki.stream });
+    expect(build({ HYDE_APP_HELP_DESK_LOKI_STREAM: '{resource_name="x"}' }).streams("help-desk")).toEqual({ app: '{resource_name="x"}' });
+    expect(() => build({ HYDE_APP_HELP_DESK_LOKI_STREAM: "{a} | x" }))
       .toThrow(/HYDE_APP_HELP_DESK_LOKI_STREAM is not a LogQL stream selector/);
   });
 });
@@ -147,7 +147,7 @@ describe("tools against the registry", () => {
     const { loki, requests } = silentLoki();
     const schemas = new Map([...REGISTRY.apps.keys()].map((app) => [app, parseSchema({ app, fields: {} })]));
     const client = await connectInMemory({
-      logs: { schemas, loki, sources: readLokiConfig(REGISTRY, { COCKPIT_LOGS_URL: "https://l.test", COCKPIT_LOGS_READ_TOKEN: "t" }).sources },
+      logs: { loki, sources: buildLogSources({ registry: REGISTRY, schemas, env: {} }) },
       sql: { databases: untouchable, schemas: new Map([...REGISTRY.apps.keys()].map((app) => [app, "# x\n"])) },
     });
     const result = await client.callTool({ name, arguments: { app: "other", ...args } });
@@ -160,10 +160,11 @@ describe("tools against the registry", () => {
   it("a third app in apps.json is accepted by every tool with no code change", async () => {
     const { loki, requests } = silentLoki();
     const app = "help-desk";
-    const sources = readLokiConfig(REGISTRY_WITH_THIRD, { COCKPIT_LOGS_URL: "https://l.test", COCKPIT_LOGS_READ_TOKEN: "t" }).sources;
+    const schemas = new Map([[app, parseSchema({ app, fields: { action: "visible" } })]]);
+    const sources = buildLogSources({ registry: REGISTRY_WITH_THIRD, schemas, env: {} });
     const client = await connectInMemory({
       registry: REGISTRY_WITH_THIRD,
-      logs: { schemas: new Map([[app, parseSchema({ app, fields: { action: "visible" } })]]), loki, sources },
+      logs: { loki, sources },
       sql: { databases: { ...untouchable, has: (a) => a === app }, schemas: new Map([[app, "# help-desk redacted schema\n"]]) },
     });
     const ping = JSON.parse(textOf(await client.callTool({ name: "ping", arguments: { app } })));
