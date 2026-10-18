@@ -1,22 +1,37 @@
 // HTTP front: `/health` without a token, `/mcp` with one (D16). The token is
-// checked by a `TokenVerifier` (D39), static tokens from the config unless one
-// is injected; the server gets the resulting principal. Each request gets its
+// checked by a `TokenVerifier` (D39): GitHub-shaped tokens against GitHub
+// (D59), every other one against the static tokens from the config, unless a
+// verifier is injected; the server gets the resulting principal. A token that
+// cannot be checked right now is a 503 with a one-line JSON error. Each request gets its
 // own stateless Streamable HTTP transport, so no session state lives in the
 // container and scale-to-zero costs nothing.
 
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "../config.ts";
-import { StaticTokenVerifier, type TokenVerifier } from "./auth.ts";
+import type { Registry } from "../registry.ts";
+import { CompositeVerifier, StaticTokenVerifier, VerificationUnavailableError, type TokenVerifier } from "./auth.ts";
+import { GitHubTokenVerifier, type GitHubVerifierOptions } from "./github-auth.ts";
 import { createServer, type ServerOptions } from "./server.ts";
 
 export interface AppOptions extends ServerOptions {
-  /** Verifies the bearer token; defaults to the static tokens in `config.clients`. */
+  /** Verifies the bearer token; defaults to `createVerifier`. */
   verifier?: TokenVerifier;
+  /** The GitHub verifier's fetch and clock, for tests. */
+  github?: Pick<GitHubVerifierOptions, "fetch" | "now">;
+}
+
+/** GitHub tokens against GitHub, every other token against `config.clients`. */
+export function createVerifier(config: Config, registry: Registry, github: AppOptions["github"] = {}): CompositeVerifier {
+  return new CompositeVerifier(
+    new GitHubTokenVerifier({ registry, ttlSeconds: config.githubScopeTtlSeconds, ...github }),
+    new StaticTokenVerifier(config.clients),
+  );
 }
 
 export function createApp(config: Config, options: AppOptions) {
-  const { verifier = new StaticTokenVerifier(config.clients), ...serverOptions } = options;
+  const { verifier: given, github, ...serverOptions } = options;
+  const verifier = given ?? createVerifier(config, serverOptions.registry, github);
   return createHttpServer(async (req, res) => {
     try {
       await route(req, res, verifier, serverOptions);
@@ -32,7 +47,15 @@ async function route(req: IncomingMessage, res: ServerResponse, verifier: TokenV
   if (url.pathname === "/health") return json(res, 200, { ok: true });
   if (url.pathname !== "/mcp") return json(res, 404, { error: "not found" });
 
-  const principal = await verifier.verify(req.headers.authorization);
+  let principal;
+  try {
+    principal = await verifier.verify(req.headers.authorization);
+  } catch (e) {
+    if (!(e instanceof VerificationUnavailableError)) throw e;
+    console.warn(JSON.stringify({ level: "warn", message: `token verification unavailable: ${e.message}` }));
+    res.setHeader("Retry-After", "30");
+    return json(res, 503, { error: `token verification unavailable: ${e.message}` });
+  }
   if (!principal) {
     res.setHeader("WWW-Authenticate", 'Bearer realm="hyde-mcp-gateway"');
     return json(res, 401, { error: "unauthorized" });

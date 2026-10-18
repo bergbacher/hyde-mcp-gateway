@@ -35,7 +35,7 @@ Without `APP_REPOS_READ_TOKEN` the server runs in developer mode and reads the f
 
 The server starts with every app in `apps.json` and computes, per app, what it can answer from the registry, the environment and the schema files loaded (LEDGER D37). The schema store ([`src/schema-store.ts`](src/schema-store.ts), D58) loads each app's two files at startup: with `APP_REPOS_READ_TOKEN` from the app repo's default branch through the GitHub API (the entry's `logSchemaPath` and `redactedSchemaPath`), without it from `schemas/` (developer mode). It loads them again every `HYDE_SCHEMA_REFRESH_SECONDS` (default 600). Each file is validated before it replaces the one held; a file that fails to fetch or validate keeps the last good one, and the app gets one `warn` line per refresh naming every reason. The tools read the store per call, so a refresh changes their behaviour without a restart. An app answers the log tools when its log field schema is loaded, and `describe_schema` and `query_sql` when its redacted schema is loaded and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: log schema is missing`, before it reads anything, so an app without its schema can leak nothing. No app failing stops the start: an app whose files the first fetch cannot get is not configured until a refresh gets them. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. A registered app outside the caller's token scope (`HYDE_TOKEN_<CLIENT>_APPS`, D39) is refused next, with `client <client> is not authorized for app <app>`, before readiness is checked and before any backend is touched; so a scoped client learns nothing about the configuration of apps it may not read. The startup line lists under `apps` what each app answered at startup (`logs`, `sql`) and the schema `source` (`github` or `local`); a `warn` line follows for every app that is not fully configured, and an `info` line whenever a refresh loads a changed file. So shop can go live while crm waits: shop's schema files merged in its repo, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables.
 
-The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts); the static tokens are its only implementation today. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
+The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. A GitHub token works as well (see [GitHub tokens as client credentials](#github-tokens-as-client-credentials)). Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts): GitHub-shaped tokens go to the GitHub verifier, every other token to the static ones. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
 Client setup, issuing and rotating client tokens, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
 
@@ -84,8 +84,9 @@ An app with only some of this answers the tools it is ready for and is refused a
 
 | Variable | |
 | --- | --- |
-| `HYDE_TOKEN_<CLIENT>` | One client's bearer token, at least 32 characters; the client name is the suffix. At least one. |
+| `HYDE_TOKEN_<CLIENT>` | One client's bearer token, at least 32 characters, not starting like a GitHub token; the client name is the suffix. At least one. |
 | `HYDE_TOKEN_<CLIENT>_APPS` | Required with each token: the apps that client may read, comma-separated `apps.json` names (`shop,crm`), or `*` for every registered app (D39). The server refuses to start, naming the variable, when a token lacks it, when it names an app `apps.json` does not hold, or when it is set without its token. |
+| `HYDE_GITHUB_SCOPE_TTL_SECONDS` | Optional: how long a GitHub token's login and readable apps are reused before GitHub is asked again, default 300; `0` asks on every request. A whole number, or the server does not start. |
 | `PORT` | Listen port, default 8080. |
 | `COCKPIT_LOGS_URL` | The Cockpit logs data source, `https://<id>.logs.cockpit.fr-par.scw.cloud`. Required. |
 | `COCKPIT_LOGS_READ_TOKEN` | Cockpit token with the `read_only_logs` scope (D20), sent as `X-Token`. Required. |
@@ -98,6 +99,16 @@ An app with only some of this answers the tools it is ready for and is refused a
 | `NODE_ENV` | `production` requires, for every app whose URL is set, `ssl=true` and its CA, or the server does not start. |
 
 `<NAME>` is the app's name in `apps.json` upper-cased, `-` → `_`: `HYDE_APP_SHOP_REDACTED_URL`. A variable of an app `apps.json` does not register is ignored. The two overrides are for local runs and incidents; in production change `apps.json`, which `infra/` does not declare them for.
+
+### GitHub tokens as client credentials
+
+A client may send a GitHub token it already holds instead of a static token (D59): `gh auth token`, or a fine-grained personal access token with read access to the app repositories. A token starting with `ghp_`, `gho_`, `ghu_`, `ghs_` or `github_pat_` is checked against GitHub, as that token: `GET /user` gives the login, and `GET /repos/{owner}/{repo}` for each app's `repo` in `apps.json` decides the scope, 200 meaning readable. The caller is the client `gh:<login>` (`gh:octocat`) and may read the apps whose repository it can read; `ping` reports that `client` and `scope`. A token that reads none of them is accepted with an empty scope, so every tool refuses it as unauthorized.
+
+- GitHub answers `/user` with 401 (revoked or unknown token) or 403 (no user behind it): HTTP 401, as for a wrong static token.
+- GitHub is unreachable, rate-limits, or answers 5xx: HTTP 503 with `{"error":"token verification unavailable: <cause>"}` and `Retry-After`; nothing is cached, the next request asks again.
+- The result is cached in memory by the token's SHA-256 for `HYDE_GITHUB_SCOPE_TTL_SECONDS` (default 300), so a revoked token or a removed repository access keeps working until then.
+
+Static tokens with `_APPS` stay for service accounts such as the agent runner. The startup line lists `verifiers: ["github", "static"]`; `clients` lists the static ones only.
 
 ## Log tools
 
