@@ -78,7 +78,7 @@ describe("runApply", () => {
   it("writes every secret and reports the container id and HTTPS endpoint", () => {
     const exec = scaleway();
     const result = runApply(config(), exec, { ...SECRETS }, { sleep: () => {} });
-    expect(result).toEqual({ ok: true, containerId: LIVE.id, endpoint: "https://hyde-mcp-gateway.example.invalid" });
+    expect(result).toEqual({ ok: true, containerId: LIVE.id, endpoint: "https://examplens-hyde-mcp-gateway.functions.fnc.example.invalid" });
     expect(writes(exec)[0]).toEqual(expect.arrayContaining([`secret-environment-variables.HYDE_TOKEN_AGENT=${"t".repeat(32)}`]));
   });
 
@@ -167,6 +167,25 @@ describe("runCli", () => {
     const { code, out } = cli(["diff", "production", "--strict"], scaleway());
     expect(code).toBe(0);
     expect(out).toBe("No drift detected.");
+  });
+
+  it("apply --keep-secrets prints the endpoint from public_endpoint", () => {
+    const { code, out } = cli(["apply", "production", "--keep-secrets"], scaleway(), { HYDE_IMAGE_TAG: "sha" });
+    expect(code).toBe(0);
+    expect(out.split("\n")).toContain("endpoint=https://examplens-hyde-mcp-gateway.functions.fnc.example.invalid");
+  });
+
+  it("apply prints an empty endpoint= line and says so when the container reports none", () => {
+    const base = scaleway();
+    const noEndpoint = vi.fn((args: string[]): ScwExecResult =>
+      args[1] === "container" && args.includes("get")
+        ? { stdout: JSON.stringify({ ...LIVE, public_endpoint: null, domain_name: null }), exitCode: 0 }
+        : base(args),
+    );
+    const { code, out, err } = cli(["apply", "production"], noEndpoint as ReturnType<typeof scaleway>, SECRETS);
+    expect(code).toBe(0);
+    expect(out.split("\n")).toContain("endpoint=");
+    expect(err).toMatch(/no public endpoint/);
   });
 
   it("apply logs no secret value, on success or failure", () => {

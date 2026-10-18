@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KindContext, ScwExecResult } from "../../scripts/infra/config.ts";
 import * as container from "../../scripts/infra/kinds/container.ts";
-import { LIVE, config, makeExec } from "./fixtures.ts";
+import { LIVE, RECORDED_CONTAINER_GET, config, makeExec } from "./fixtures.ts";
 
 describe("container.read", () => {
   it("returns null when no container has the configured name", () => {
@@ -207,8 +207,17 @@ describe("formatMemoryLimitArg / imageRepository / endpoint", () => {
     expect(container.imageRepository("rg.example:5000/ns/hyde-mcp-gateway")).toBe("rg.example:5000/ns/hyde-mcp-gateway");
   });
 
-  it("builds the HTTPS endpoint from the domain name", () => {
-    expect(container.endpoint(LIVE)).toBe("https://hyde-mcp-gateway.example.invalid");
-    expect(container.endpoint({ ...LIVE, domain_name: undefined })).toBeUndefined();
+  it("reads the HTTPS endpoint from public_endpoint in a recorded get answer (domain_name null)", () => {
+    expect(RECORDED_CONTAINER_GET.domain_name).toBeNull();
+    expect(container.endpoint(RECORDED_CONTAINER_GET)).toBe("https://examplens-hyde-mcp-gateway.functions.fnc.example.invalid");
+  });
+
+  it("falls back to domain_name, and is undefined when neither is set", () => {
+    expect(container.endpoint({ ...LIVE, public_endpoint: null, domain_name: "hyde.example.invalid" })).toBe(
+      "https://hyde.example.invalid",
+    );
+    expect(container.endpoint({ ...LIVE, public_endpoint: "hyde.example.invalid/" })).toBe("https://hyde.example.invalid");
+    expect(container.endpoint({ ...LIVE, public_endpoint: null, domain_name: null })).toBeUndefined();
+    expect(container.endpoint({ ...LIVE, public_endpoint: undefined, domain_name: undefined })).toBeUndefined();
   });
 });
