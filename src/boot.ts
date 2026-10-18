@@ -16,7 +16,7 @@ import { readConfig, readLokiConfig, type Config } from "./config.ts";
 import { createDatabases } from "./db/pool.ts";
 import { createLoki } from "./loki.ts";
 import { scopeOf } from "./mcp/auth.ts";
-import { createServer, type ServerOptions } from "./mcp/server.ts";
+import { toolsOf, type ServerOptions } from "./mcp/server.ts";
 import { sqlReadiness } from "./mcp/sql.ts";
 import { appNames, loadRegistry, type App, type Registry } from "./registry.ts";
 import { loadEdgeSchema, loadRedactedSchemas, loadSchemas, SCHEMA_DIR } from "./schemas.ts";
@@ -69,8 +69,7 @@ export function boot({ registry = loadRegistry(), schemaDir = SCHEMA_DIR, env = 
 
   // Per app and tool group, what is missing; an empty list means it answers.
   const missing = appNames(registry).map((app) => ({ app, groups: { ...logs.sources.groups(app), sql: sql.missing(app) } }));
-  // The tools a server built from these options registers; no principal is needed to list them.
-  const { tools } = createServer({ client: "boot", apps: new Set() }, options);
+  const tools = toolsOf(options);
 
   const report: StartupReport = {
     info: {

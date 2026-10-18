@@ -27,11 +27,22 @@ export interface ServerOptions {
 /** The MCP server for `principal`, and the names of the tools it registered, in order. */
 export function createServer(principal: Principal, options: ServerOptions): { server: McpServer; tools: string[] } {
   const server = new McpServer({ name: "hyde-mcp-gateway", version: "0.0.0" });
+  const tools = register(server, principal, options);
+  return { server, tools };
+}
+
+/** The names of the tools a server built from `options` registers, in order, without building one. */
+export function toolsOf(options: ServerOptions): string[] {
+  return register({ registerTool: () => undefined as never }, { client: "", apps: new Set() }, options);
+}
+
+/** Registers every tool `options` enables on `target` and returns their names in order. */
+function register(target: Registrar, principal: Principal, options: ServerOptions): string[] {
   const tools: string[] = [];
   const registrar: Registrar = {
     registerTool: (name, config, callback) => {
       tools.push(name);
-      return server.registerTool(name, config, callback);
+      return target.registerTool(name, config, callback);
     },
   };
   const { registry } = options;
@@ -53,5 +64,5 @@ export function createServer(principal: Principal, options: ServerOptions): { se
   if (options.logs) registerLogTools(registrar, gate, options.logs);
   if (options.sql) registerSqlTools(registrar, gate, options.sql);
 
-  return { server, tools };
+  return tools;
 }
