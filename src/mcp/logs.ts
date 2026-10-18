@@ -13,7 +13,7 @@ import type { Json } from "hyde-json";
 import { z } from "zod";
 import { LokiError, nsOf, type Loki } from "../loki.ts";
 import { KINDS, LEVELS, SOURCES, type LogFilter, type LogReader, type LogSources, type Source } from "../sources/index.ts";
-import { appSchema, error, forApp, notConfigured, text, type Gate } from "./server.ts";
+import { appSchema, error, forApp, notConfigured, text, type Gate } from "./tool.ts";
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
