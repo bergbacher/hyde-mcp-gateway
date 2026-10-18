@@ -11,7 +11,7 @@ import { appNames, appVariables, envPrefix, loadRegistry, parseRegistry } from "
 import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP } from "./helpers.ts";
 
 const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
-const TOKEN = { HYDE_TOKEN_X: "a".repeat(32) };
+const TOKEN = { HYDE_TOKEN_X: "a".repeat(32), HYDE_TOKEN_X_APPS: "*" };
 
 /** THIRD_APP with `patch` applied at a dotted path; `undefined` deletes the key. */
 function third(path: string, value: unknown) {
@@ -157,7 +157,7 @@ describe("tools against the registry", () => {
       sql: { databases: { ...untouchable, has: (a) => a === app }, schemas: new Map([[app, "# help-desk redacted schema\n"]]) },
     });
     const ping = JSON.parse(textOf(await client.callTool({ name: "ping", arguments: { app } })));
-    expect(ping).toEqual({ app, client: "test", apps: appNames(REGISTRY_WITH_THIRD) });
+    expect(ping).toEqual({ app, client: "test", apps: appNames(REGISTRY_WITH_THIRD), scope: "*" });
     expect((await client.callTool({ name: "query_logs", arguments: { app } })).isError).toBeFalsy();
     expect((await client.callTool({ name: "count_errors", arguments: { app } })).isError).toBeFalsy();
     const logql = new URL(requests[0]!).searchParams.get("query")!;

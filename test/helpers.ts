@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Principal } from "../src/mcp/auth.ts";
 import { createServer, type ServerOptions } from "../src/mcp/server.ts";
 import { loadRegistry, parseRegistry, REGISTRY_FILE, type Registry } from "../src/registry.ts";
 
@@ -31,10 +32,19 @@ export function registryJsonWithThirdApp(): { apps: Record<string, unknown> } {
 
 export const REGISTRY_WITH_THIRD: Registry = parseRegistry(registryJsonWithThirdApp());
 
-/** An MCP client connected in memory to a server built from `options`; the registry defaults to apps.json. */
-export async function connectInMemory(options: Omit<ServerOptions, "registry"> & { registry?: Registry }) {
+/** A caller allowed every app. */
+export const ALL_APPS: Principal = { client: "test", apps: "*" };
+
+/**
+ * An MCP client connected in memory to a server built from `options`; the
+ * registry defaults to apps.json, the caller to ALL_APPS.
+ */
+export async function connectInMemory(
+  options: Omit<ServerOptions, "registry"> & { registry?: Registry; principal?: Principal },
+) {
+  const { principal = ALL_APPS, ...rest } = options;
   const [a, b] = InMemoryTransport.createLinkedPair();
-  await createServer("test", { registry: REGISTRY, ...options }).connect(a);
+  await createServer(principal, { registry: REGISTRY, ...rest }).connect(a);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(b);
   return client;

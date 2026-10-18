@@ -9,6 +9,7 @@ pnpm install
 pnpm schemas                  # schemas/<app>.hyde-json.json for the log tools; needs GITHUB_TOKEN or a `gh` login with read access to the app repos
 pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md for describe_schema and query_sql
 HYDE_TOKEN_CLAUDE_CODE=$(openssl rand -hex 32) \
+HYDE_TOKEN_CLAUDE_CODE_APPS='*' \
 COCKPIT_LOGS_URL=https://<id>.logs.cockpit.fr-par.scw.cloud \
 COCKPIT_LOGS_READ_TOKEN=<read_only_logs token> \
 pnpm dev
@@ -18,9 +19,9 @@ Both fetch scripts take `--app <name>` (repeatable, any app in `apps.json`) to f
 
 ### Per-app readiness
 
-The server starts with every app in `apps.json` and computes, per app, what it can answer from the registry, the environment and the schema files present (LEDGER D37). An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. The startup line lists under `apps` what each app answers (`logs`, `sql`) and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables. The image needs at least one app with both schema files.
+The server starts with every app in `apps.json` and computes, per app, what it can answer from the registry, the environment and the schema files present (LEDGER D37). An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. A registered app outside the caller's token scope (`HYDE_TOKEN_<CLIENT>_APPS`, D39) is refused next, with `client <client> is not authorized for app <app>`, before readiness is checked and before any backend is touched; so a scoped client learns nothing about the configuration of apps it may not read. The startup line lists under `apps` what each app answers (`logs`, `sql`) and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables. The image needs at least one app with both schema files.
 
-The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters). `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
+The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts); the static tokens are its only implementation today. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
 Client setup, issuing and rotating client tokens, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
 
@@ -52,23 +53,24 @@ An app with only some of this answers the tools it is ready for and is refused a
 
 ## Tools
 
-`app` is the name of an app in `apps.json` on every tool; any other name is a tool error naming the registered apps.
+`app` is the name of an app in `apps.json` on every tool; any other name is a tool error naming the registered apps, and an app outside the caller's scope is a tool error naming the client and the app.
 
 | Tool | Returns |
 | --- | --- |
-| `ping(app)` | `{app, client, apps}`: proves auth and routing; `apps` lists the registered apps. |
+| `ping(app)` | `{app, client, apps, scope}`: proves auth and routing; `apps` lists the registered apps, `scope` the apps this client may read or `"*"`. |
 | `query_logs(app, hours=24, level?, action?, limit=100)` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. See [Log tools](#log-tools). |
 | `count_errors(app, hours=24)` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. |
 | `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Loaded at startup from `schemas/<app>.redacted-schema.md`. |
 | `query_sql(app, sql, limit?)` | `{columns, rows, truncated}` for one `SELECT` (or `WITH ... SELECT`) over the app's redacted views. See [SQL tools](#sql-tools). |
 
-`createServer(client, options)` takes the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (log schemas, Loki client, each app's log source), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options)` passes `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
+`createServer(principal, options)` takes the caller (`{client, apps}`, from the `TokenVerifier`) and the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (log schemas, Loki client, each app's log source), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options)` verifies the token with `options.verifier` (default: the static tokens in `config`) and passes the rest of `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
 
 ## Environment
 
 | Variable | |
 | --- | --- |
 | `HYDE_TOKEN_<CLIENT>` | One client's bearer token, at least 32 characters; the client name is the suffix. At least one. |
+| `HYDE_TOKEN_<CLIENT>_APPS` | Required with each token: the apps that client may read, comma-separated `apps.json` names (`shop,crm`), or `*` for every registered app (D39). The server refuses to start, naming the variable, when a token lacks it, when it names an app `apps.json` does not hold, or when it is set without its token. |
 | `PORT` | Listen port, default 8080. |
 | `COCKPIT_LOGS_URL` | The Cockpit logs data source, `https://<id>.logs.cockpit.fr-par.scw.cloud`. Required. |
 | `COCKPIT_LOGS_READ_TOKEN` | Cockpit token with the `read_only_logs` scope (D20), sent as `X-Token`. Required. |
@@ -180,7 +182,9 @@ The global keys are listed in `infra/base.yaml`. Each app's two keys are derived
 | `COCKPIT_LOGS_URL` | plain | The Cockpit logs (Loki) data source URL, `https://<id>.logs.cockpit.fr-par.scw.cloud` |
 | `COCKPIT_LOGS_READ_TOKEN` | secret | Cockpit token, scope `read_only_logs` (D20) |
 | `HYDE_TOKEN_CLAUDE_CODE` | secret | Claude Code's bearer token, `openssl rand -hex 32` |
+| `HYDE_TOKEN_CLAUDE_CODE_APPS` | plain | The apps Claude Code may read: comma-separated `apps.json` names, or `*` (D39) |
 | `HYDE_TOKEN_AGENT` | secret | the agent runner's bearer token, `openssl rand -hex 32` |
+| `HYDE_TOKEN_AGENT_APPS` | plain | The apps agent may read, same form |
 | `HYDE_APP_SHOP_REDACTED_URL` | secret, per app | shop's redacted reader, `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true` (hyde-db) |
 | `HYDE_APP_SHOP_DATABASE_CA` | secret, per app | shop's RDB instance CA, PEM text |
 | `HYDE_APP_CRM_REDACTED_URL` | secret, per app | crm's redacted reader, same form |
@@ -248,4 +252,4 @@ Then:
 2. `pnpm infra:apply`. Without `HYDE_IMAGE_TAG` the running image stays; the container rolls to a new revision with the new token and `apply` returns once it is ready. From then on the old token gets 401.
 3. Give the client its new token (the agent runner's secret store; `HYDE_TOKEN_CLAUDE_CODE` in your environment for Claude Code).
 
-A new client is a new `HYDE_TOKEN_<CLIENT>` entry in `infra/base.yaml` `variables:` and in `apply.env`, then `pnpm infra:apply`. Removing one: delete both, run `pnpm infra:apply`, then `pnpm infra:diff`; if it still lists the old name live, remove that secret in the console.
+A new client is a new `HYDE_TOKEN_<CLIENT>` and `HYDE_TOKEN_<CLIENT>_APPS` pair in `infra/base.yaml` `variables:` and in `apply.env`, then `pnpm infra:apply`. Changing a client's apps is an edit of its `_APPS` line in `apply.env` and `pnpm infra:apply`. Removing one: delete both pairs, run `pnpm infra:apply`, then `pnpm infra:diff`; if it still lists the old name live, remove that secret in the console.

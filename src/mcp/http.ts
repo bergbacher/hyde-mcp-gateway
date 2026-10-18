@@ -1,17 +1,25 @@
-// HTTP front: `/health` without a token, `/mcp` with one (D16). Each request
-// gets its own stateless Streamable HTTP transport, so no session state lives
-// in the container and scale-to-zero costs nothing.
+// HTTP front: `/health` without a token, `/mcp` with one (D16). The token is
+// checked by a `TokenVerifier` (D39), static tokens from the config unless one
+// is injected; the server gets the resulting principal. Each request gets its
+// own stateless Streamable HTTP transport, so no session state lives in the
+// container and scale-to-zero costs nothing.
 
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "../config.ts";
-import { authenticate } from "./auth.ts";
+import { StaticTokenVerifier, type TokenVerifier } from "./auth.ts";
 import { createServer, type ServerOptions } from "./server.ts";
 
-export function createApp(config: Config, options: ServerOptions) {
+export interface AppOptions extends ServerOptions {
+  /** Verifies the bearer token; defaults to the static tokens in `config.clients`. */
+  verifier?: TokenVerifier;
+}
+
+export function createApp(config: Config, options: AppOptions) {
+  const { verifier = new StaticTokenVerifier(config.clients), ...serverOptions } = options;
   return createHttpServer(async (req, res) => {
     try {
-      await route(req, res, config, options);
+      await route(req, res, verifier, serverOptions);
     } catch (e) {
       console.error(JSON.stringify({ level: "error", message: e instanceof Error ? e.message : String(e) }));
       if (!res.headersSent) json(res, 500, { error: "internal error" });
@@ -19,19 +27,19 @@ export function createApp(config: Config, options: ServerOptions) {
   });
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, config: Config, options: ServerOptions) {
+async function route(req: IncomingMessage, res: ServerResponse, verifier: TokenVerifier, options: ServerOptions) {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === "/health") return json(res, 200, { ok: true });
   if (url.pathname !== "/mcp") return json(res, 404, { error: "not found" });
 
-  const client = authenticate(req.headers.authorization, config.clients);
-  if (!client) {
+  const principal = await verifier.verify(req.headers.authorization);
+  if (!principal) {
     res.setHeader("WWW-Authenticate", 'Bearer realm="hyde-mcp-gateway"');
     return json(res, 401, { error: "unauthorized" });
   }
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const server = createServer(client, options);
+  const server = createServer(principal, options);
   res.on("close", () => {
     void transport.close();
     void server.close();

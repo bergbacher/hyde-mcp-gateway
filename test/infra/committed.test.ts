@@ -37,7 +37,9 @@ describe("committed infra/", () => {
       COCKPIT_LOGS_URL: flags(true, false),
       COCKPIT_LOGS_READ_TOKEN: flags(true, true),
       HYDE_TOKEN_CLAUDE_CODE: flags(true, true),
+      HYDE_TOKEN_CLAUDE_CODE_APPS: flags(true, false),
       HYDE_TOKEN_AGENT: flags(true, true),
+      HYDE_TOKEN_AGENT_APPS: flags(true, false),
       ...perApp,
     });
     expect(new Set(config.variables.map((v) => v.name)).size).toBe(config.variables.length);

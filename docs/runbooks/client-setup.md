@@ -56,7 +56,7 @@ With 1Password CLI, read it the same way: `op read "op://<vault>/hyde-mcp-gatewa
 
 ### Check the connection
 
-Start `claude` in the repo. The first time, it asks whether to trust the project's MCP server; accept. `/mcp` should show `hyde-mcp-gateway` as connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with `app: "crm"`. The answer `{"app":"crm","client":"claude-code","apps":["shop","crm"]}` confirms the token and the client name, and lists the apps registered in `apps.json`.
+Start `claude` in the repo. The first time, it asks whether to trust the project's MCP server; accept. `/mcp` should show `hyde-mcp-gateway` as connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with `app: "crm"`. The answer `{"app":"crm","client":"claude-code","apps":["shop","crm"],"scope":"*"}` confirms the token and the client name, lists the apps registered in `apps.json`, and shows the apps this token may read (`scope`, `"*"` for all; see [App scope](#app-scope)). An app outside the scope answers `client claude-code is not authorized for app <app>`; ping one inside it.
 
 If `/mcp` shows the server as failed, check these:
 
@@ -70,7 +70,7 @@ Against a server on your machine (README, Run locally), point the same entry at 
 
 ```sh
 export HYDE_TOKEN_CLAUDE_CODE=$(openssl rand -hex 32)
-pnpm dev &        # plus the other variables README, Run locally lists
+HYDE_TOKEN_CLAUDE_CODE_APPS='*' pnpm dev &        # plus the other variables README, Run locally lists
 HYDE_URL=http://localhost:8080/mcp claude
 ```
 
@@ -80,10 +80,25 @@ That throwaway token is a different value from the production one and never goes
 
 The operator who holds `apply.env` (gitignored, on their machine only) does this. Every client has its own token, `HYDE_TOKEN_<CLIENT>`. The suffix, lowercased with `_` as `-`, is the client name that `ping` reports.
 
+### App scope
+
+Every token has an app scope, `HYDE_TOKEN_<CLIENT>_APPS` (D39): the apps that client may read, as comma-separated `apps.json` names, or `*` for every registered app, today and later.
+
+```sh
+HYDE_TOKEN_AGENT_APPS=shop,crm
+HYDE_TOKEN_CLAUDE_CODE_APPS=*
+```
+
+- There is no implicit all-access. The server refuses to start, naming the variable, when a token has no `_APPS` line, when it names an app `apps.json` does not hold, or when an `_APPS` line has no token.
+- A tool call for an app outside the scope is a tool error, `client <client> is not authorized for app <app>`, before any log or database read. The scope is per app, not per tool.
+- The scope is not secret (`secret: false` in `infra/base.yaml`). Prefer listing apps over `*`: `*` also grants every app added to `apps.json` later.
+- Changing a scope: edit the `_APPS` line in `apply.env`, `pnpm infra:apply`, then `ping` an app in the new scope.
+
 ### New client
 
-1. Declare `HYDE_TOKEN_<CLIENT>` in `infra/base.yaml` under `variables:` as required and `secret: true`, like the existing ones. Open a PR for this; it holds no value.
-2. Continue with step 1 below, adding the line instead of replacing it.
+1. Declare `HYDE_TOKEN_<CLIENT>` in `infra/base.yaml` under `variables:` as required and `secret: true`, and `HYDE_TOKEN_<CLIENT>_APPS` as required and `secret: false`, like the existing ones. Open a PR for this; it holds no value.
+2. Add `HYDE_TOKEN_<CLIENT>_APPS=<apps>` to `apply.env` ([App scope](#app-scope)).
+3. Continue with step 1 below, adding the token line instead of replacing it.
 
 ### Rotate (or issue)
 
@@ -135,7 +150,7 @@ Run from the repo root, with the `scw` key for the apps' Scaleway project in sco
 
 ### Remove a client
 
-Delete its `variables:` entry in `infra/base.yaml` and its line in `apply.env`, run `pnpm infra:apply`, then `pnpm infra:diff`. If `diff` still lists the name live, remove that secret in the console. Probe the removed token as in step 5; it must get 401.
+Delete its two `variables:` entries (token and `_APPS`) in `infra/base.yaml` and its two lines in `apply.env`, run `pnpm infra:apply`, then `pnpm infra:diff`. If `diff` still lists the name live, remove that secret in the console. Probe the removed token as in step 5; it must get 401.
 
 ## 3. First analysis
 

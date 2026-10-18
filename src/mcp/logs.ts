@@ -11,9 +11,9 @@ import { redactLine, type Json, type LogSchema } from "hyde-json";
 import { z } from "zod";
 import type { LogSource } from "../config.ts";
 import { LokiError, nsOf, type Loki, type LokiEntry } from "../loki.ts";
-import type { App, Registry } from "../registry.ts";
+import type { App } from "../registry.ts";
 import type { Schemas } from "../schemas.ts";
-import { appSchema, error, forApp, notConfigured, text } from "./server.ts";
+import { appSchema, error, forApp, notConfigured, text, type Gate } from "./server.ts";
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
@@ -78,7 +78,7 @@ export interface LogLine {
   payload: Json;
 }
 
-export function registerLogTools(server: McpServer, registry: Registry, options: LogsOptions) {
+export function registerLogTools(server: McpServer, gate: Gate, options: LogsOptions) {
   const { schemas, loki, sources, now = Date.now } = options;
   function window(h: number) {
     const end = now();
@@ -93,7 +93,7 @@ export function registerLogTools(server: McpServer, registry: Registry, options:
         "Every line is redacted by the app's log field schema: undeclared and hidden fields read `[hidden]`, free text is scrubbed. " +
         "Returns how many lines matched and how many were returned.",
       inputSchema: {
-        app: appSchema(registry),
+        app: appSchema(gate.registry),
         hours,
         level: z.enum(["error", "info"]).optional().describe('Only lines of this level: "error" or "info"'),
         action: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/, "action must be an action name (letters, digits, _ . : / -)")
@@ -103,7 +103,7 @@ export function registerLogTools(server: McpServer, registry: Registry, options:
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(registry, async ({ app, hours: h, level, action, limit }) => {
+    forApp(gate, async ({ app, hours: h, level, action, limit }) => {
       const schema = schemas.get(app);
       const source = sources.get(app);
       if (!schema || !source) return notConfigured(app, logsMissing(app, options));
@@ -126,10 +126,10 @@ export function registerLogTools(server: McpServer, registry: Registry, options:
       description:
         "Counts the app's error lines of the last `hours` by action, most frequent first. " +
         `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there.`,
-      inputSchema: { app: appSchema(registry), hours },
+      inputSchema: { app: appSchema(gate.registry), hours },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(registry, async ({ app, hours: h }) => {
+    forApp(gate, async ({ app, hours: h }) => {
       const schema = schemas.get(app);
       const source = sources.get(app);
       if (!schema || !source) return notConfigured(app, logsMissing(app, options));

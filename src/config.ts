@@ -1,6 +1,7 @@
 // Configuration from the environment. Client tokens are `HYDE_TOKEN_<CLIENT>`,
-// one per client (D16); the client name is the suffix, lower-cased. Each
-// registered app (src/registry.ts, D38) reads its secrets under
+// one per client (D16); the client name is the suffix, lower-cased. Each token
+// needs its app scope in `HYDE_TOKEN_<CLIENT>_APPS` (D39, src/mcp/auth.ts),
+// checked against the registry. Each registered app (src/registry.ts, D38) reads its secrets under
 // `HYDE_APP_<NAME>_`: `REDACTED_URL` for its redacted database and
 // `DATABASE_CA` for TLS (src/db/connection.ts); `CERT_NAME` and `LOKI_STREAM`
 // override the registry's values. Each app's URL is optional: an app without
@@ -8,28 +9,19 @@
 // production an app with a URL needs `ssl=true` and its CA.
 
 import { resolveDatabase, type DatabaseConfig } from "./db/connection.ts";
+import { readClientTokens, type Principal } from "./mcp/auth.ts";
 import { appVariables, STREAM_SELECTOR, type App, type Registry } from "./registry.ts";
 
 export interface Config {
   port: number;
-  /** token → client name */
-  clients: Map<string, string>;
+  /** token → client name and app scope (src/mcp/auth.ts readClientTokens, D39) */
+  clients: ReadonlyMap<string, Principal>;
   /** The apps whose URL is set; the others are left out (D37). */
   databases: ReadonlyMap<App, DatabaseConfig>;
 }
 
-const TOKEN_PREFIX = "HYDE_TOKEN_";
-
 export function readConfig(registry: Registry, env: NodeJS.ProcessEnv = process.env): Config {
-  const clients = new Map<string, string>();
-  for (const [key, value] of Object.entries(env)) {
-    if (!key.startsWith(TOKEN_PREFIX) || !value) continue;
-    const name = key.slice(TOKEN_PREFIX.length).toLowerCase().replaceAll("_", "-");
-    if (value.length < 32) throw new Error(`${key} is shorter than 32 characters`);
-    if (clients.has(value)) throw new Error(`${key} repeats another client's token`);
-    clients.set(value, name);
-  }
-  if (clients.size === 0) throw new Error(`No client token set (${TOKEN_PREFIX}<CLIENT>)`);
+  const clients = readClientTokens(registry, env);
   const port = Number(env.PORT ?? 8080);
   if (!Number.isInteger(port) || port <= 0) throw new Error(`PORT is not a port: ${env.PORT}`);
   return { port, clients, databases: readDatabases(registry, env) };

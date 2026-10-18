@@ -3,6 +3,7 @@ import { createDatabases } from "../db/pool.ts";
 import { createLoki } from "../loki.ts";
 import { appNames, loadRegistry } from "../registry.ts";
 import { loadRedactedSchemas, loadSchemas } from "../schemas.ts";
+import { scopeOf } from "./auth.ts";
 import { createApp } from "./http.ts";
 import { logsMissing } from "./logs.ts";
 import { sqlMissing, toolNames, type ServerOptions } from "./server.ts";
@@ -34,7 +35,8 @@ createApp(config, options).listen(config.port, () => {
   console.log(JSON.stringify({
     level: "info",
     message: `hyde-mcp-gateway listening on :${config.port}`,
-    clients: [...config.clients.values()],
+    // client → the apps it may read, or "*" (D39).
+    clients: Object.fromEntries([...config.clients.values()].map((p) => [p.client, scopeOf(p)])),
     tools: toolNames(options),
     // app → the tool groups it answers: "logs", "sql".
     apps: Object.fromEntries(missing.map(({ app, groups }) => [

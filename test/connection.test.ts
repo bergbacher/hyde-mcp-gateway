@@ -45,7 +45,7 @@ describe("database connection", () => {
   });
 
   it("config reads each app's database; in production an app with a URL needs its CA (D37)", () => {
-    const token = { HYDE_TOKEN_X: "a".repeat(32) };
+    const token = { HYDE_TOKEN_X: "a".repeat(32), HYDE_TOKEN_X_APPS: "*" };
     expect(readConfig(REGISTRY, token).databases.size).toBe(0);
     const c = readConfig(REGISTRY, { ...token, HYDE_APP_SHOP_REDACTED_URL: "mysql://r:x@localhost/redacted" });
     expect([...c.databases.keys()]).toEqual(["shop"]);

@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { parseSchema, redactLine } from "hyde-json";
 import { logSources, readLokiConfig } from "../src/config.ts";
 import { createLoki } from "../src/loki.ts";
+import type { Principal } from "../src/mcp/auth.ts";
 import { ERROR_SCAN_LIMIT, countQuery, logQuery } from "../src/mcp/logs.ts";
 import { createServer } from "../src/mcp/server.ts";
 import type { Schemas } from "../src/schemas.ts";
@@ -45,7 +46,7 @@ const recorded: Respond = (url) =>
   url.pathname.endsWith("/query_range") ? new Response(RECORDED, { headers: { "content-type": "application/json" } }) : vector(42);
 
 /** An MCP client on a server whose Loki is a fake fetch; `requests` records every call. */
-async function connect(respond: Respond = recorded, logSchemas: Schemas = schemas) {
+async function connect(respond: Respond = recorded, logSchemas: Schemas = schemas, principal: Principal = { client: "claude-code", apps: "*" }) {
   const requests: { url: URL; headers: Headers }[] = [];
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -53,7 +54,7 @@ async function connect(respond: Respond = recorded, logSchemas: Schemas = schema
     return respond(url);
   }) as typeof globalThis.fetch;
   const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch });
-  const server = createServer("claude-code", { registry: REGISTRY, logs: { schemas: logSchemas, loki, sources: SOURCES, now: () => NOW } });
+  const server = createServer(principal, { registry: REGISTRY, logs: { schemas: logSchemas, loki, sources: SOURCES, now: () => NOW } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
@@ -224,6 +225,40 @@ describe("an app without a log schema (D37)", () => {
     }
     expect(requests).toHaveLength(0);
     expect((await call("count_errors", { app: "crm" })).isError).toBe(false);
+  });
+});
+
+describe("app scope (D39)", () => {
+  const shopOnly: Principal = { client: "claude-code", apps: new Set(["shop"]) };
+
+  it("refuses an app outside the token's scope at both log tools, naming client and app, before Loki is asked", async () => {
+    const { call, requests } = await connect(recorded, schemas, shopOnly);
+    for (const tool of ["query_logs", "count_errors"]) {
+      const result = await call(tool, { app: "crm", hours: 24 });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe("client claude-code is not authorized for app crm");
+    }
+    expect(requests).toHaveLength(0);
+  });
+
+  it("allows an app in scope", async () => {
+    const { call, requests } = await connect(recorded, schemas, shopOnly);
+    expect((await call("count_errors", { app: "shop" })).isError).toBe(false);
+    expect(requests.length).toBeGreaterThan(0);
+  });
+
+  it("allows every registered app with *", async () => {
+    const { call, requests } = await connect(recorded, schemas, { client: "agent", apps: "*" });
+    for (const app of REGISTRY.apps.keys()) expect((await call("query_logs", { app })).isError).toBe(false);
+    expect(requests.length).toBe(2 * REGISTRY.apps.size);
+  });
+
+  it("checks the registry first, then the scope, then readiness", async () => {
+    const { call, requests } = await connect(recorded, new Map(), shopOnly);
+    expect((await call("query_logs", { app: "other" })).text).toMatch(/^unknown app other; registered: /);
+    expect((await call("query_logs", { app: "crm" })).text).toBe("client claude-code is not authorized for app crm");
+    expect((await call("query_logs", { app: "shop" })).text).toMatch(/^shop is not configured: /);
+    expect(requests).toHaveLength(0);
   });
 });
 

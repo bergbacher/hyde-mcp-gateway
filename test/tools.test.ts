@@ -64,6 +64,64 @@ describe("query_sql", () => {
   });
 });
 
+describe("app scope at the SQL tools (D39)", () => {
+  /** A database that counts every connection attempt. */
+  function counting() {
+    const connects: string[] = [];
+    const databases: Databases = {
+      has: () => true,
+      connect: (app) => {
+        connects.push(app);
+        return Promise.reject(new Error("reached the database"));
+      },
+      close: async () => {},
+    };
+    return { databases, connects };
+  }
+  const schemas = new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]);
+  const shopOnly = { client: "agent", apps: new Set(["shop"]) };
+
+  it("refuses an app outside the scope at describe_schema and query_sql without touching the database", async () => {
+    const { databases, connects } = counting();
+    const client = await connectInMemory({ sql: { databases, schemas }, principal: shopOnly });
+    for (const name of ["describe_schema", "query_sql"]) {
+      const result = await client.callTool({ name, arguments: { app: "crm", sql: "SELECT 1" } });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toBe("client agent is not authorized for app crm");
+    }
+    expect(connects).toEqual([]);
+    await client.close();
+  });
+
+  it("allows an app in scope", async () => {
+    const { databases, connects } = counting();
+    const client = await connectInMemory({ sql: { databases, schemas }, principal: shopOnly });
+    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop\n");
+    await client.callTool({ name: "query_sql", arguments: { app: "shop", sql: "SELECT 1" } });
+    expect(connects).toEqual(["shop"]);
+    await client.close();
+  });
+
+  it("allows every registered app with *", async () => {
+    const { databases, connects } = counting();
+    const client = await connectInMemory({ sql: { databases, schemas }, principal: { client: "agent", apps: "*" } });
+    for (const app of REGISTRY.apps.keys()) await client.callTool({ name: "query_sql", arguments: { app, sql: "SELECT 1" } });
+    expect(connects).toEqual([...REGISTRY.apps.keys()]);
+    await client.close();
+  });
+
+  it("ping reports the scope, and refuses an app outside it", async () => {
+    const client = await connectInMemory({ principal: shopOnly });
+    expect(JSON.parse(textOf(await client.callTool({ name: "ping", arguments: { app: "shop" } })))).toEqual({
+      app: "shop", client: "agent", apps: [...REGISTRY.apps.keys()], scope: ["shop"],
+    });
+    const refused = await client.callTool({ name: "ping", arguments: { app: "crm" } });
+    expect(refused.isError).toBe(true);
+    expect(textOf(refused)).toBe("client agent is not authorized for app crm");
+    await client.close();
+  });
+});
+
 describe("registration", () => {
   const sql = { databases: untouchable, schemas: new Map() };
   const logs = {
