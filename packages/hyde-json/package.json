@@ -1,0 +1,9 @@
+{
+  "name": "hyde-json",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Redacts log lines by a declared field schema: allowlisted fields pass, free text is scrubbed, stack frames are kept.",
+  "type": "module",
+  "engines": { "node": ">=24.2" },
+  "exports": { ".": "./src/index.ts" }
+}
