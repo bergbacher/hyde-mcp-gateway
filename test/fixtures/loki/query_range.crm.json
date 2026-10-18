@@ -1,0 +1,44 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {
+          "resource_name": "example-crm-prod",
+          "stream": "stdout",
+          "action": "invite-member",
+          "level": "info",
+          "service": "crm",
+          "message_email": "jane.doe@example.com"
+        },
+        "values": [
+          [
+            "1792324200000000000",
+            "{\"action\":\"invite-member\",\"error\":false,\"level\":\"info\",\"timestamp\":\"2026-10-18T11:50:00.000Z\",\"message\":{\"workspaceId\":\"ws_7f3a\",\"email\":\"jane.doe@example.com\",\"note\":\"invited by phone +49 171 2345678\"},\"service\":\"crm\"}"
+          ]
+        ]
+      },
+      {
+        "stream": {
+          "resource_name": "example-crm-prod",
+          "stream": "stdout",
+          "action": "send-mail",
+          "level": "error",
+          "service": "crm"
+        },
+        "values": [
+          [
+            "1792323900000000000",
+            "{\"action\":\"send-mail\",\"error\":true,\"level\":\"error\",\"timestamp\":\"2026-10-18T11:45:00.000Z\",\"message\":\"retry failed for jane.doe@example.com, token sk_live_9fQ2xLmP4vR8tZ1wY6nB3cD7\",\"service\":\"crm\"}"
+          ],
+          [
+            "1792323600000000000",
+            "{\"action\":\"send-mail\",\"error\":true,\"level\":\"error\",\"timestamp\":\"2026-10-18T11:40:00.000Z\",\"message\":{\"workspaceId\":\"ws_7f3a\",\"err\":{\"name\":\"SmtpError\",\"message\":\"550 mailbox john.roe@example.org unavailable\",\"stack\":\"SmtpError: 550 mailbox john.roe@example.org unavailable\\n    at deliver (/app/lib/mail.ts:41:11)\\n    at async sendInvite (/app/lib/invite.ts:88:3)\"}},\"service\":\"crm\"}"
+          ]
+        ]
+      }
+    ],
+    "stats": {}
+  }
+}

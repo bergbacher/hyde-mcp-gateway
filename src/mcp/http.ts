@@ -6,12 +6,12 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Config } from "../config.ts";
 import { authenticate } from "./auth.ts";
-import { createServer } from "./server.ts";
+import { createServer, type ServerOptions } from "./server.ts";
 
-export function createApp(config: Config) {
+export function createApp(config: Config, options: ServerOptions = {}) {
   return createHttpServer(async (req, res) => {
     try {
-      await route(req, res, config);
+      await route(req, res, config, options);
     } catch (e) {
       console.error(JSON.stringify({ level: "error", message: e instanceof Error ? e.message : String(e) }));
       if (!res.headersSent) json(res, 500, { error: "internal error" });
@@ -19,7 +19,7 @@ export function createApp(config: Config) {
   });
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, config: Config) {
+async function route(req: IncomingMessage, res: ServerResponse, config: Config, options: ServerOptions) {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (url.pathname === "/health") return json(res, 200, { ok: true });
   if (url.pathname !== "/mcp") return json(res, 404, { error: "not found" });
@@ -31,7 +31,7 @@ async function route(req: IncomingMessage, res: ServerResponse, config: Config) 
   }
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const server = createServer(client);
+  const server = createServer(client, options);
   res.on("close", () => {
     void transport.close();
     void server.close();
