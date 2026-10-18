@@ -157,6 +157,32 @@ describe("secrets stay out of the repository", () => {
     expect(workflow.slice(build)).toMatch(/context: \.\n/);
   });
 
+  // D44: a manual build-only run pushes the image for the first local apply and never touches the container.
+  it("the deploy workflow's build-only run pushes a manual tag and skips apply, diff and smoke check, whatever the switch says", async () => {
+    const { parse } = await import("yaml");
+    const workflow = parse(read(".github/workflows/deploy.yml"));
+    expect(workflow.on.workflow_dispatch.inputs.build_only).toMatchObject({ type: "boolean", default: false });
+    const job = workflow.jobs.deploy;
+    expect(job.if).toBe("vars.HYDE_DEPLOY_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.build_only)");
+    const steps: { name?: string; uses?: string; if?: string; run?: string; with?: Record<string, string> }[] = job.steps;
+    const index = (match: (s: (typeof steps)[number]) => boolean) => steps.findIndex(match);
+    const push = index((s) => s.uses?.startsWith("docker/build-push-action") ?? false);
+    expect(steps[push]!.if).toBeUndefined();
+    expect(steps[push]!.with!.tags).toContain("format('manual-{0}', github.sha)");
+    for (const step of steps.slice(push + 1)) {
+      if (step.run?.includes("GITHUB_STEP_SUMMARY")) {
+        expect(step.if).toBe("inputs.build_only");
+        expect(step.run).toContain("HYDE_IMAGE_TAG=$GITHUB_SHA pnpm infra:apply");
+      } else {
+        expect(step.if, `${step.name} must not run in a build-only run`).toBe("${{ !inputs.build_only }}");
+      }
+    }
+    for (const command of ["apply production", "diff production"]) {
+      const step = index((s) => s.run?.includes(command) ?? false);
+      expect(step).toBeGreaterThan(push);
+    }
+  });
+
   it("schemas/ is gitignored but its README", () => {
     expect(read(".gitignore").split("\n")).toEqual(expect.arrayContaining(["schemas/*", "!schemas/README.md"]));
   });

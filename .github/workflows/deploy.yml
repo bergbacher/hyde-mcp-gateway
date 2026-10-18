@@ -13,6 +13,13 @@
 # Unset, the job is skipped. Set it after the first local deploy (README,
 # Deploy): `--keep-secrets` refuses to create the container.
 #
+# Build only (D44): a manual run with `build_only` set fetches, verifies,
+# builds and pushes `<sha>` and `manual-<sha>` (never `latest`), skips apply,
+# diff and smoke check, and writes the local `pnpm infra:apply` command to the
+# job summary. It runs whatever `HYDE_DEPLOY_ENABLED` says: it is how the
+# first image reaches the registry without Docker on the operator's machine,
+# since this workflow may not create the container (D28).
+#
 # Secrets read: SCW_ACCESS_KEY, SCW_SECRET_KEY, as repository secrets. They
 # override the organisation-level pair of the same name, which
 # belongs to another Scaleway organisation; scripts/infra/organisation.ts
@@ -27,6 +34,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      build_only:
+        description: "Only build and push the image (no apply, no diff); for the first local apply"
+        type: boolean
+        default: false
 
 # One container: never two rollouts at once, never cancel a running one.
 concurrency:
@@ -38,8 +50,8 @@ permissions:
 
 jobs:
   deploy:
-    name: Build, push, apply, verify
-    if: vars.HYDE_DEPLOY_ENABLED == 'true'
+    name: ${{ inputs.build_only && 'Build and push image only' || 'Build, push, apply, verify' }}
+    if: vars.HYDE_DEPLOY_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.build_only)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -103,7 +115,8 @@ jobs:
           password: ${{ secrets.SCW_SECRET_KEY }}
 
       # `context: .` builds from the workspace, which holds the fetched
-      # schemas/; the action's default (the commit) would not.
+      # schemas/; the action's default (the commit) would not. A build-only
+      # run tags `manual-<sha>` instead of moving `latest`.
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -112,12 +125,31 @@ jobs:
           push: true
           tags: |
             ${{ steps.target.outputs.image }}:${{ github.sha }}
-            ${{ steps.target.outputs.image }}:latest
+            ${{ steps.target.outputs.image }}:${{ inputs.build_only && format('manual-{0}', github.sha) || 'latest' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Print the local apply command
+        if: inputs.build_only
+        env:
+          IMAGE: ${{ steps.target.outputs.image }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Image pushed, nothing applied"
+            echo
+            echo "\`$IMAGE:$GITHUB_SHA\` (also \`manual-$GITHUB_SHA\`). Create or update the container locally, with \`apply.env\` written (README, First deploy):"
+            echo
+            echo '```sh'
+            echo "HYDE_IMAGE_TAG=$GITHUB_SHA pnpm infra:apply"
+            echo "pnpm infra:diff"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Build only stops here: none of the steps below runs.
       - name: Apply (secrets kept as live)
         id: apply
+        if: ${{ !inputs.build_only }}
         env:
           HYDE_IMAGE_TAG: ${{ github.sha }}
         run: |
@@ -126,10 +158,12 @@ jobs:
           grep '^endpoint=' "$RUNNER_TEMP/apply.log" >> "$GITHUB_OUTPUT"
 
       - name: Read the container back
+        if: ${{ !inputs.build_only }}
         run: node scripts/infra/apply.ts diff production --strict
 
       # Min scale 0: the first request may wake an instance, hence the retries.
       - name: Smoke check over HTTPS
+        if: ${{ !inputs.build_only }}
         env:
           ENDPOINT: ${{ steps.apply.outputs.endpoint }}
         run: |

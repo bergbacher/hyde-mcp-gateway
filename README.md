@@ -206,6 +206,8 @@ Secret values land in `secret-environment-variables`, which `scw` returns only a
 
 `.github/workflows/deploy.yml` runs on every push to `main`: fetch `schemas/` (`pnpm schemas`, `pnpm fetch:redacted-schemas`), verify the credential's target, build `Dockerfile`, push `rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
 
+A manual run with `build_only` (`gh workflow run deploy.yml -f build_only=true`) runs whatever that variable says, and only fetches `schemas/`, verifies the credential's target, builds and pushes `<sha>` and `manual-<sha>` (it never moves `latest`). It runs no apply, diff or smoke check and writes the command for the local apply, `HYDE_IMAGE_TAG=<sha> pnpm infra:apply`, to the job summary (D44).
+
 The workflow reads three repository secrets, none of them a runtime value of the server:
 
 | Secret | Used for |
@@ -232,7 +234,18 @@ Then:
 2. Set that key as repository secrets `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`. Repository secrets override the organisation-level pair; without them the workflow fails at the organisation check.
 3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`. Without it the workflow fails at the schema fetch.
 4. Write `apply.env` with every required key above and both keys of each app to configure.
-5. Fetch the schemas, push the first image and create the container, with the `scw` key in your shell and a `gh` login (or `GITHUB_TOKEN`) that can read both app repos:
+5. Push the first image. No Docker needed on your machine: run the workflow in build-only mode on `main` and wait for it to finish:
+   ```sh
+   gh workflow run deploy.yml --ref main -f build_only=true
+   gh run watch "$(gh run list --workflow deploy.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+   ```
+   Its job summary prints the exact command for the next step, with the commit it built.
+6. Create the container from that image, with the `scw` key in your shell and `<sha>` from the summary:
+   ```sh
+   HYDE_IMAGE_TAG=<sha> pnpm infra:apply     # prints containerId= and endpoint=
+   pnpm infra:diff
+   ```
+   **Alternative, with Docker locally** instead of steps 5 and 6: fetch the schemas, push the image and create the container yourself, with a `gh` login (or `GITHUB_TOKEN`) that can read both app repos:
    ```sh
    pnpm schemas                  # schemas/<app>.hyde-json.json
    pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md
@@ -243,8 +256,8 @@ Then:
    HYDE_IMAGE_TAG=$tag pnpm infra:apply      # prints containerId= and endpoint=
    pnpm infra:diff
    ```
-6. Set the repository variable `HYDE_DEPLOY_ENABLED` to `true`. From then on every push to `main` deploys.
-7. Point the clients at `<endpoint>/mcp` with their tokens.
+7. Set the repository variable `HYDE_DEPLOY_ENABLED` to `true`. From then on every push to `main` deploys.
+8. Point the clients at `<endpoint>/mcp` with their tokens.
 
 ### Rotate a client token
 

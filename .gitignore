@@ -6,3 +6,4 @@ dist/
 schemas/*
 !schemas/README.md
 .claude/
+.smoke/
