@@ -93,6 +93,7 @@ Single source of truth for this product. Every record: ID, type (A assumption, D
 | D52 | Every log line leaves the server only through hyde-json's `redactLine`; an edge line's `action`, `level` and `status` are derived from the redacted line, and the server calls no scrubber itself. | proposed | reason: D14 holds today by care, not by construction: `edgeFields` re-parses the raw line and scrubs the path in `src/mcp/logs.ts`; D46 declares method, origin status and WAF action visible and the URL text, so the derivation loses nothing | @darivs (proposed by Claude) |
 | D53 | A source an app lacks is refused in the D37 form, `<app> is not configured: no edge stream in apps.json`. `source` stays a parameter of `query_logs` and `count_errors`. The edge stream has no environment override. | active | reason: D37 (one form for everything missing); D5, D9 (clients change nothing); no override is needed yet | @darivs |
 | D54 | `apps.json`, `infra/environments/<env>.yaml` and `apply.env` are operator files: gitignored, backed up outside git, with committed examples (`apps.example.json`, `production.example.yaml`). The deploy workflow receives the first two as repository secrets `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` and masks every value in them. | proposed | reason: the repository is public-ready; app hosts, Scaleway ids and repo names belong to the deploying organisation, not the code (D38) | @darivs (proposed by Claude) |
+| D56 | Edge levels: `error` is origin or client status ≥ 500; `waf` is a WAF block without a 5xx; everything else is `info`. count_errors counts `error` only. | active | reason: a WAF in log_only mode marks about 4 % of requests block while the origin answers 200 (refines D46) | @darivs |
 ## Trace
 
 - 2026-10-18 — A1–A6, D1–D6, Q1–Q3 created from @darivs' input, gated by Claude. by: @darivs
@@ -126,3 +127,4 @@ Single source of truth for this product. Every record: ID, type (A assumption, D
 - 2026-10-18 — D51, D52 proposed from the architecture review (log sources as a module, redaction by construction); D53 decided in the specify round. by: @darivs (proposed by Claude)
 - 2026-10-18 — D54 proposed: operator files out of the repository. by: @darivs (proposed by Claude)
 - 2026-10-18 — Q7 answered by D55 (`HYDE_` prefix); repository rebuilt with a public-ready history. by: @darivs
+- 2026-10-18 — D56 added: edge level `waf` for WAF blocks without a 5xx; count_errors counts origin or client 5xx only (refines D46). by: @darivs
