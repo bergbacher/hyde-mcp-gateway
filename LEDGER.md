@@ -132,3 +132,4 @@ Single source of truth for this product. Every record: ID, type (A assumption, D
 - 2026-10-18 — Q7 answered by D55 (`HYDE_` prefix); repository rebuilt with a public-ready history. by: @darivs
 - 2026-10-18 — D56 added: edge level `waf` for WAF blocks without a 5xx; count_errors counts origin or client 5xx only (refines D46). by: @darivs
 - 2026-10-19 — A25 verified (Q5 answered); D58 runtime schemas and D59 GitHub-token clients decided. by: @darivs
+- 2026-10-19 — D59 implemented: GitHub tokens verified against GitHub (`/user`, `/repos/{repo}` per app), scope cached by token hash for `HYDE_GITHUB_SCOPE_TTL_SECONDS`; static tokens unchanged (PR: GitHub tokens as client credentials, #20). by: @darivs (proposed by Claude)

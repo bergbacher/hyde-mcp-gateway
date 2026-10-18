@@ -4,7 +4,7 @@ import { createLoki } from "../loki.ts";
 import { appNames, loadRegistry } from "../registry.ts";
 import { loadEdgeSchema, loadRedactedSchemas, loadSchemas } from "../schemas.ts";
 import { scopeOf } from "./auth.ts";
-import { createApp } from "./http.ts";
+import { createApp, createVerifier } from "./http.ts";
 import { logsMissing } from "./logs.ts";
 import { sqlMissing, toolNames, type ServerOptions } from "./server.ts";
 
@@ -38,11 +38,16 @@ const missing = appNames(registry).map((app) => ({
   groups: { logs: logsMissing(app, options.logs), sql: sqlMissing(app, options.sql) },
 }));
 
-createApp(config, options).listen(config.port, () => {
+const verifier = createVerifier(config, registry);
+
+createApp(config, { ...options, verifier }).listen(config.port, () => {
   console.log(JSON.stringify({
     level: "info",
     message: `hyde-mcp-gateway listening on :${config.port}`,
-    // client → the apps it may read, or "*" (D39).
+    // Who checks a token: GitHub for GitHub-shaped tokens (D59), the static tokens otherwise.
+    verifiers: verifier.kinds,
+    githubScopeTtlSeconds: config.githubScopeTtlSeconds,
+    // static client → the apps it may read, or "*" (D39).
     clients: Object.fromEntries([...config.clients.values()].map((p) => [p.client, scopeOf(p)])),
     tools: toolNames(options),
     // app → the tool groups it answers: "logs", "sql".
