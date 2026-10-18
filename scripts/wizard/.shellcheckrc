@@ -1,0 +1,3 @@
+# The wizard library (above the STAGES marker) is kept identical across
+# wizards; its "$e[Enter keeps current]" is a readline escape, not an array.
+disable=SC1087

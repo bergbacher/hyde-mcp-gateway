@@ -2,6 +2,7 @@ node_modules/
 apply.env
 .env*
 dist/
+.redacted-sql/
 schemas/*
 !schemas/README.md
 .claude/

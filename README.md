@@ -119,3 +119,7 @@ HYDE_TEST_MYSQL_CA_FILE="$(brew --prefix)/var/mysql/ca.pem" \
 HYDE_TEST_MYSQL_CERT_NAME="$(openssl x509 -in "$(brew --prefix)/var/mysql/server-cert.pem" -noout -subject -nameopt multiline | sed -n 's/ *commonName *= //p')" \
 pnpm test
 ```
+
+## Database reader
+
+The server reads each app's database as `redacted_reader`, which can read only hyde-db's views. An admin creates the account and applies the views with `scripts/wizard/redacted-reader.sh`. The wizard writes `CRM_REDACTED_URL` and `SHOP_REDACTED_URL` to `apply.env`. First run, re-apply after a migration and rotation: [`docs/runbooks/redacted-reader.md`](docs/runbooks/redacted-reader.md).
