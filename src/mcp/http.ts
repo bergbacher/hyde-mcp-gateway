@@ -39,7 +39,7 @@ async function route(req: IncomingMessage, res: ServerResponse, verifier: TokenV
   }
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const server = createServer(principal, options);
+  const { server } = createServer(principal, options);
   res.on("close", () => {
     void transport.close();
     void server.close();

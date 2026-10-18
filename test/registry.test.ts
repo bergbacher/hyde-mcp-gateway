@@ -6,6 +6,7 @@ import { parseSchema } from "hyde-json";
 import { query } from "../scripts/registry.ts";
 import { readConfig } from "../src/config.ts";
 import { createLoki } from "../src/loki.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { buildLogSources } from "../src/sources/index.ts";
 import { appNames, appVariables, envPrefix, EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry } from "../src/registry.ts";
 import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP, untouchable } from "./helpers.ts";
@@ -146,7 +147,7 @@ describe("tools against the registry", () => {
     const schemas = new Map([...REGISTRY.apps.keys()].map((app) => [app, parseSchema({ app, fields: {} })]));
     const client = await connectInMemory({
       logs: { loki, sources: buildLogSources({ registry: REGISTRY, schemas, env: {} }) },
-      sql: { databases: untouchable, schemas: new Map([...REGISTRY.apps.keys()].map((app) => [app, "# x\n"])) },
+      sql: sqlReadiness({ databases: untouchable, schemas: new Map([...REGISTRY.apps.keys()].map((app) => [app, "# x\n"])) }),
     });
     const result = await client.callTool({ name, arguments: { app: "other", ...args } });
     expect(result.isError).toBe(true);
@@ -163,7 +164,7 @@ describe("tools against the registry", () => {
     const client = await connectInMemory({
       registry: REGISTRY_WITH_THIRD,
       logs: { loki, sources },
-      sql: { databases: { ...untouchable, has: (a) => a === app }, schemas: new Map([[app, "# help-desk redacted schema\n"]]) },
+      sql: sqlReadiness({ databases: { ...untouchable, has: (a) => a === app }, schemas: new Map([[app, "# help-desk redacted schema\n"]]) }),
     });
     const ping = JSON.parse(textOf(await client.callTool({ name: "ping", arguments: { app } })));
     expect(ping).toEqual({ app, client: "test", apps: appNames(REGISTRY_WITH_THIRD), scope: "*" });
@@ -182,7 +183,7 @@ describe("tools against the registry", () => {
   it("a registered app without its secrets is refused as not configured, naming its prefixed variable (D37)", async () => {
     const client = await connectInMemory({
       registry: REGISTRY_WITH_THIRD,
-      sql: { databases: { ...untouchable, has: () => false }, schemas: new Map([["help-desk", "# x\n"]]) },
+      sql: sqlReadiness({ databases: { ...untouchable, has: () => false }, schemas: new Map([["help-desk", "# x\n"]]) }),
     });
     const result = await client.callTool({ name: "describe_schema", arguments: { app: "help-desk" } });
     expect(textOf(result)).toBe("help-desk is not configured: HYDE_APP_HELP_DESK_REDACTED_URL is not set");

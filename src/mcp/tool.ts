@@ -7,6 +7,7 @@
 // "<app> is not configured: <what is missing>" (D37); the other apps are
 // unaffected. Tool groups import from here, never from the server module.
 
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { appNames, unknownApp, type App, type Registry } from "../registry.ts";
@@ -16,6 +17,9 @@ import { allowed, unauthorized, type Principal } from "./auth.ts";
 export function appSchema(registry: Registry) {
   return z.string().describe(`The app to read, one of: ${appNames(registry).join(", ")}`);
 }
+
+/** Where a tool group registers its tools: the server, through `createServer`, which records their names. */
+export type Registrar = Pick<McpServer, "registerTool">;
 
 /** What every tool checks `app` against: the registry, then the caller's scope. */
 export interface Gate {

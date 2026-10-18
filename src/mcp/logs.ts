@@ -7,13 +7,12 @@
 // values, are never read. An (app, source) that lacks something is refused
 // before Loki is asked (D37, D53).
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Json } from "hyde-json";
 import { z } from "zod";
 import { LokiError, nsOf, type Loki } from "../loki.ts";
 import { KINDS, SOURCES, type LogFilter, type LogReader, type LogSources, type Source } from "../sources/index.ts";
-import { appSchema, error, forApp, notConfigured, text, type Gate } from "./tool.ts";
+import { appSchema, error, forApp, notConfigured, text, type Gate, type Registrar } from "./tool.ts";
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
@@ -43,7 +42,7 @@ const hours = z.number().positive("hours must be positive")
 
 const notes = (key: "queryLogs" | "countErrors") => KINDS.flatMap((k) => (k.describe[key] ? [` ${k.describe[key]}`] : [])).join("");
 
-export function registerLogTools(server: McpServer, gate: Gate, { sources, loki, now = Date.now }: LogsOptions) {
+export function registerLogTools(server: Registrar, gate: Gate, { sources, loki, now = Date.now }: LogsOptions) {
   function window(h: number) {
     const end = now();
     return { start: nsOf(end - h * 3_600_000), end: nsOf(end) };

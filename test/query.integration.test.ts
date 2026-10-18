@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { resolveDatabase } from "../src/db/connection.ts";
 import { createDatabases } from "../src/db/pool.ts";
+import { sqlReadiness } from "../src/mcp/sql.ts";
 import { connectInMemory, textOf } from "./helpers.ts";
 
 const URL_ = process.env.HYDE_TEST_MYSQL_URL;
@@ -18,7 +19,7 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
   afterAll(() => databases.close());
 
   async function call(sql: string, limit?: number) {
-    const client = await connectInMemory({ sql: { databases, schemas: new Map([["crm", "# crm\n"]]) } });
+    const client = await connectInMemory({ sql: sqlReadiness({ databases, schemas: new Map([["crm", "# crm\n"]]) }) });
     const result = await client.callTool({ name: "query_sql", arguments: { app: "crm", sql, limit } });
     await client.close();
     return result;
