@@ -1,5 +1,11 @@
 // Configuration from the environment. Client tokens are `HYDE_TOKEN_<CLIENT>`,
-// one per client (D16); the client name is the suffix, lower-cased.
+// one per client (D16); the client name is the suffix, lower-cased. Each app's
+// redacted database is `<APP>_REDACTED_URL`, with `<APP>_DATABASE_CA` and
+// `<APP>_DATABASE_CERT_NAME` for TLS (src/db/connection.ts). Production needs
+// both apps' databases; elsewhere an app without a URL answers its database
+// tools with an error.
+
+import { resolveDatabase, type DatabaseConfig } from "./db/connection.ts";
 
 export const APPS = ["shop", "crm"] as const;
 export type App = (typeof APPS)[number];
@@ -8,6 +14,7 @@ export interface Config {
   port: number;
   /** token → client name */
   clients: Map<string, string>;
+  databases: Partial<Record<App, DatabaseConfig>>;
 }
 
 const TOKEN_PREFIX = "HYDE_TOKEN_";
@@ -24,7 +31,29 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (clients.size === 0) throw new Error(`No client token set (${TOKEN_PREFIX}<CLIENT>)`);
   const port = Number(env.PORT ?? 8080);
   if (!Number.isInteger(port) || port <= 0) throw new Error(`PORT is not a port: ${env.PORT}`);
-  return { port, clients };
+  return { port, clients, databases: readDatabases(env) };
+}
+
+function readDatabases(env: NodeJS.ProcessEnv): Partial<Record<App, DatabaseConfig>> {
+  const production = env.NODE_ENV === "production";
+  const databases: Partial<Record<App, DatabaseConfig>> = {};
+  for (const app of APPS) {
+    const prefix = app.toUpperCase();
+    const name = `${prefix}_REDACTED_URL`;
+    const url = env[name];
+    if (!url) {
+      if (production) throw new Error(`${name} is not set`);
+      continue;
+    }
+    databases[app] = resolveDatabase({
+      name,
+      url,
+      ca: env[`${prefix}_DATABASE_CA`] || undefined,
+      certName: env[`${prefix}_DATABASE_CERT_NAME`] || undefined,
+      production,
+    });
+  }
+  return databases;
 }
 
 // Loki (D14, D20): the Cockpit logs data source and its `read_only_logs` token.
