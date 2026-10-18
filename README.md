@@ -10,7 +10,9 @@ Three files configure one deployment. They name your apps, your Scaleway account
 | --- | --- | --- |
 | `apps.json` | The app registry: per app its repo, schema paths, Loki stream selectors, database endpoint, certificate name and CA source ([Adding an app](#adding-an-app)). No secret. | `cp apps.example.json apps.json` |
 | `infra/environments/production.yaml` | Your Scaleway organisation and project ids, registry endpoint, and the container's name, namespace and image ([Deploy](#deploy)). No secret. | `cp infra/environments/production.example.yaml infra/environments/production.yaml` |
-| `apply.env` | Every runtime secret and value of the container ([apply.env](#applyenv)). | written by hand and by the reader wizard |
+| `apply.env` | Every runtime secret and value of the container ([apply.env](#applyenv)), among them `APP_REPOS_READ_TOKEN`, with which the server fetches the apps' schema files at runtime. | written by hand and by the reader wizard |
+
+No app's schema file is an operator file or part of the image: the server reads each app's log field schema and redacted schema from the app's repository at startup and refreshes them on a schedule (D58, [Per-app readiness](#per-app-readiness)).
 
 The server, the fetch scripts, the wizard, `infra/` and the `Dockerfile` read `apps.json` and stop with a message pointing at the example when it is missing; `infra/` does the same for `production.yaml`. The deploy workflow cannot see local files: it writes `apps.json` and `production.yaml` from the repository secrets `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` and masks every value in them ([Deploy workflow](#deploy-workflow)). The tests read only the committed examples.
 
@@ -27,13 +29,13 @@ COCKPIT_LOGS_READ_TOKEN=<read_only_logs token> \
 pnpm dev
 ```
 
-Both fetch scripts take `--app <name>` (repeatable, any app in `apps.json`) to fetch only those apps, and `--strict` to fail when any requested app is missing. The server refuses to start only when `schemas/` holds no log field schema at all, or a present one is invalid (see [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md)).
+Without `APP_REPOS_READ_TOKEN` the server runs in developer mode and reads the files the two fetch scripts wrote to `schemas/`; with it, it fetches them from the app repos itself, as in production, and `schemas/` is not read. Both fetch scripts take `--app <name>` (repeatable, any app in `apps.json`) to fetch only those apps, and `--strict` to fail when any requested app is missing. See [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md).
 
 ### Per-app readiness
 
-The server starts with every app in `apps.json`. Its boot step, `boot()` in [`src/boot.ts`](src/boot.ts), computes once, per app and tool group, what it can answer from the registry, the environment and the schema files present (LEDGER D37): ready, with what the tools read, or what is missing. The tools ask that readiness; the entry point only boots, listens and prints the startup report. An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. A registered app outside the caller's token scope (`HYDE_TOKEN_<CLIENT>_APPS`, D39) is refused next, with `client <client> is not authorized for app <app>`, before readiness is checked and before any backend is touched; so a scoped client learns nothing about the configuration of apps it may not read. The startup line lists under `apps` what each app answers (`logs`, `edge` when `apps.json` declares it, `sql`) and under `sources` the stream each of its log sources reads, and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables. The image needs at least one app with both schema files.
+The server starts with every app in `apps.json`. Its boot step, `boot()` in [`src/boot.ts`](src/boot.ts), builds once, per app and tool group, what it can answer from the registry, the environment and the schema files loaded (LEDGER D37): ready, with what the tools read, or what is missing. The tools ask that readiness; the entry point only boots, listens and prints the startup report. The schema store ([`src/schema-store.ts`](src/schema-store.ts), D58) loads each app's two files at startup: with `APP_REPOS_READ_TOKEN` from the app repo's default branch through the GitHub API (the entry's `logSchemaPath` and `redactedSchemaPath`), without it from `schemas/` (developer mode). It loads them again every `HYDE_SCHEMA_REFRESH_SECONDS` (default 600). Each file is validated before it replaces the one held; a file that fails to fetch or validate keeps the last good one, and the app gets one `warn` line per refresh naming every reason. The readiness built at boot reads the store per call, so a refresh changes what the tools answer without a restart. An app answers the log tools when its log field schema is loaded, and `describe_schema` and `query_sql` when its redacted schema is loaded and `HYDE_APP_<NAME>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: log schema is missing`, before it reads anything, so an app without its schema can leak nothing. No app failing stops the start: an app whose files the first fetch cannot get is not configured until a refresh gets them. A name `apps.json` does not hold is refused at every tool with `unknown app <name>; registered: shop, crm`. A registered app outside the caller's token scope (`HYDE_TOKEN_<CLIENT>_APPS`, D39) is refused next, with `client <client> is not authorized for app <app>`, before readiness is checked and before any backend is touched; so a scoped client learns nothing about the configuration of apps it may not read. The startup line lists under `apps` what each app answered at startup (`logs`, `edge` when `apps.json` declares it, `sql`), under `sources` the stream each of its log sources reads, and the schema `source` (`github` or `local`); a `warn` line follows for every app that is not fully configured, and an `info` line whenever a refresh loads a changed file. So shop can go live while crm waits: shop's schema files merged in its repo, the reader wizard with `--app shop`, and only `HYDE_APP_SHOP_*` database variables.
 
-The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts); the static tokens are its only implementation today. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
+The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. A GitHub token works as well (see [GitHub tokens as client credentials](#github-tokens-as-client-credentials)). Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts): GitHub-shaped tokens go to the GitHub verifier, every other token to the static ones. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
 Client setup, issuing and rotating client tokens, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
 
@@ -57,10 +59,10 @@ An app is one `apps.json` entry, its secrets in `apply.env`, and a re-apply. No 
    | `database.certName` | The name the instance certificate carries, checked instead of the host (the bare instance id, or the endpoint host when the certificate names it). |
    | `database.caSource` | `{repo, path, ref}` of the file holding the instance CA's PEM block, e.g. the app's `lib/database-ca.ts`. |
 
-2. **Schemas.** `pnpm schemas --app <name>` and `pnpm fetch:redacted-schemas --app <name>` fetch its two schema files; the deploy workflow fetches every registered app's. `APP_REPOS_READ_TOKEN` needs Contents: read on the new repo.
+2. **Schemas.** Give `APP_REPOS_READ_TOKEN` Contents: read on the new repo; the server fetches its two schema files at runtime (D58). For a local run without the token, `pnpm schemas --app <name>` and `pnpm fetch:redacted-schemas --app <name>` write them to `schemas/`. A later schema change in the app repo needs no deploy: the server picks it up at the next refresh (`HYDE_SCHEMA_REFRESH_SECONDS`, default 10 minutes).
 3. **Reader.** `bash scripts/wizard/fetch-redacted-sql.sh --app <name>`, then `bash scripts/wizard/redacted-reader.sh --app <name>` ([runbook](docs/runbooks/redacted-reader.md)). It writes `HYDE_APP_<NAME>_REDACTED_URL` to `apply.env`.
 4. **Secrets.** Put the instance CA in `HYDE_APP_<NAME>_DATABASE_CA` in `apply.env` (the `ca.pem` the fetch script wrote). `infra/` derives both variables from `apps.json`; nothing is listed by hand.
-5. **Re-apply.** `pnpm infra:apply`, then `pnpm infra:diff`. The next deploy builds an image with the new app's schemas.
+5. **Re-apply.** `pnpm infra:apply`, then `pnpm infra:diff`. `apps.json` is part of the image, so the registry entry itself reaches the container with the next deploy, which writes it from `HYDE_APPS_JSON`; the schema files never need one.
 
 An app with only some of this answers the tools it is ready for and is refused at the others ([Per-app readiness](#per-app-readiness)).
 
@@ -71,22 +73,25 @@ An app with only some of this answers the tools it is ready for and is refused a
 | Tool | Returns |
 | --- | --- |
 | `ping(app)` | `{app, client, apps, scope}`: proves auth and routing; `apps` lists the registered apps, `scope` the apps this client may read or `"*"`. |
-| `query_logs(app, hours=24, level?, action?, limit=100, source="app")` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. `source: "edge"` reads the app's Edge Services access log; `action` is then `<METHOD> <path>`. See [Log tools](#log-tools) and [Edge access logs](#edge-access-logs). |
-| `count_errors(app, hours=24, source="app")` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. With `source: "edge"` the rows are `{status, action, count}`: origin status and `<METHOD> <path>`. |
-| `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Loaded at startup from `schemas/<app>.redacted-schema.md`. |
+| `query_logs(app, hours=24, level?, action?, limit=100, source="app")` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. `source: "edge"` reads the app's Edge Services access log; `action` is then `<METHOD> <path>` and `level` may also be `"waf"` (requests the WAF marked block). See [Log tools](#log-tools) and [Edge access logs](#edge-access-logs). |
+| `count_errors(app, hours=24, source="app")` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. With `source: "edge"` the rows are `{status, action, count}`: origin status and `<METHOD> <path>`; only 5xx lines count, WAF hits do not. |
+| `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Fetched from the app repo's `redactedSchemaPath` and refreshed (D58; `schemas/<app>.redacted-schema.md` in developer mode). |
 | `query_sql(app, sql, limit?)` | `{columns, rows, truncated}` for one `SELECT` (or `WITH ... SELECT`) over the app's redacted views. See [SQL tools](#sql-tools). |
 
-`createServer(principal, options)` takes the caller (`{client, apps}`, from the `TokenVerifier`) and the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (the log sources and a Loki client), and `describe_schema` and `query_sql` when `options.sql` is given (each app's SQL readiness, `sqlReadiness({databases, schemas})` in [`src/mcp/sql.ts`](src/mcp/sql.ts)), and returns the server with the names of the tools it registered. `createApp(config, options)` verifies the token with `options.verifier` (default: the static tokens in `config`) and passes the rest of `options` through, so the HTTP tests run with `ping` alone. `boot()` in [`src/boot.ts`](src/boot.ts) builds the config, both tool groups' options and the startup report without listening; [`src/mcp/main.ts`](src/mcp/main.ts) boots, listens and prints the report. The log sources are one module, [`src/sources/`](src/sources/index.ts) (D51): `buildLogSources` runs once at startup on the registry, the log schemas, the edge schema and the environment, and answers per app and source a reader or what is missing. Each source (`app`, `edge`) is one implementation owning its stream, schema, LogQL, line mapping, grouping, action grammar and error text; the tools know only the reader, so a new source is one implementation listed in `KINDS` plus one registry field.
+`createServer(principal, options)` takes the caller (`{client, apps}`, from the `TokenVerifier`) and the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (the log sources and a Loki client), and `describe_schema` and `query_sql` when `options.sql` is given (each app's SQL readiness, `sqlReadiness({databases, schemas})` in [`src/mcp/sql.ts`](src/mcp/sql.ts), over the schema store's live redacted schemas), and returns the server with the names of the tools it registered. `createApp(config, options)` verifies the token with `options.verifier` (default: `createVerifier`, GitHub tokens against GitHub and the static tokens in `config`) and passes the rest of `options` through, so the HTTP tests run with `ping` alone. `boot()` in [`src/boot.ts`](src/boot.ts) builds the config, starts the schema store, builds both tool groups' readiness, the token verifier and the startup report without listening; [`src/mcp/main.ts`](src/mcp/main.ts) boots, listens and prints the report. The log sources are one module, [`src/sources/`](src/sources/index.ts) (D51): `buildLogSources` runs once at startup on the registry, the schema store's live log schemas, the edge schema and the environment, and answers per app and source a reader or what is missing, asked per call so that a schema refresh reaches it. Each source (`app`, `edge`) is one implementation owning its stream, schema, LogQL, line mapping, grouping, action grammar and error text; the tools know only the reader, so a new source is one implementation listed in `KINDS` plus one registry field.
 
 ## Environment
 
 | Variable | |
 | --- | --- |
-| `HYDE_TOKEN_<CLIENT>` | One client's bearer token, at least 32 characters; the client name is the suffix. At least one. |
+| `HYDE_TOKEN_<CLIENT>` | One client's bearer token, at least 32 characters, not starting like a GitHub token; the client name is the suffix. At least one. |
 | `HYDE_TOKEN_<CLIENT>_APPS` | Required with each token: the apps that client may read, comma-separated `apps.json` names (`shop,crm`), or `*` for every registered app (D39). The server refuses to start, naming the variable, when a token lacks it, when it names an app `apps.json` does not hold, or when it is set without its token. |
+| `HYDE_GITHUB_SCOPE_TTL_SECONDS` | Optional: how long a GitHub token's login and readable apps are reused before GitHub is asked again, default 300; `0` asks on every request. A whole number, or the server does not start. |
 | `PORT` | Listen port, default 8080. |
 | `COCKPIT_LOGS_URL` | The Cockpit logs data source, `https://<id>.logs.cockpit.fr-par.scw.cloud`. Required. |
 | `COCKPIT_LOGS_READ_TOKEN` | Cockpit token with the `read_only_logs` scope (D20), sent as `X-Token`. Required. |
+| `APP_REPOS_READ_TOKEN` | GitHub token with Contents: read on every repo `apps.json` registers; the server fetches each app's two schema files with it (D58). Required in production (`infra/base.yaml`); unset, the server reads `schemas/` (developer mode). |
+| `HYDE_SCHEMA_REFRESH_SECONDS` | Optional: how often the schema files are fetched again, in whole seconds, default 600. |
 | `HYDE_APP_<NAME>_REDACTED_URL` | The app's redacted reader connection string, `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true`. The only parameter is `ssl`; the database is always `redacted`. Unset, the app is not configured for SQL (D37). |
 | `HYDE_APP_<NAME>_DATABASE_CA` | The app's RDB instance CA certificate, PEM text (`scw rdb instance get-certificate`). Required with `ssl=true`. |
 | `HYDE_APP_<NAME>_CERT_NAME` | Optional: overrides `database.certName` from `apps.json`, the name the instance certificate must carry. |
@@ -94,6 +99,16 @@ An app with only some of this answers the tools it is ready for and is refused a
 | `NODE_ENV` | `production` requires, for every app whose URL is set, `ssl=true` and its CA, or the server does not start. |
 
 `<NAME>` is the app's name in `apps.json` upper-cased, `-` → `_`: `HYDE_APP_SHOP_REDACTED_URL`. A variable of an app `apps.json` does not register is ignored. The two overrides are for local runs and incidents; in production change `apps.json`, which `infra/` does not declare them for.
+
+### GitHub tokens as client credentials
+
+A client may send a GitHub token it already holds instead of a static token (D59): `gh auth token`, or a fine-grained personal access token with read access to the app repositories. A token starting with `ghp_`, `gho_`, `ghu_`, `ghs_` or `github_pat_` is checked against GitHub, as that token: `GET /user` gives the login, and `GET /repos/{owner}/{repo}` for each app's `repo` in `apps.json` decides the scope, 200 meaning readable. The caller is the client `gh:<login>` (`gh:octocat`) and may read the apps whose repository it can read; `ping` reports that `client` and `scope`. A token that reads none of them is accepted with an empty scope, so every tool refuses it as unauthorized.
+
+- GitHub answers `/user` with 401 (revoked or unknown token) or 403 (no user behind it): HTTP 401, as for a wrong static token.
+- GitHub is unreachable, rate-limits, or answers 5xx: HTTP 503 with `{"error":"token verification unavailable: <cause>"}` and `Retry-After`; nothing is cached, the next request asks again.
+- The result is cached in memory by the token's SHA-256 for `HYDE_GITHUB_SCOPE_TTL_SECONDS` (default 300), so a revoked token or a removed repository access keeps working until then.
+
+Static tokens with `_APPS` stay for service accounts such as the agent runner. The startup line lists `verifiers: ["github", "static"]`; `clients` lists the static ones only.
 
 ## Log tools
 
@@ -112,13 +127,18 @@ Every line Loki returns goes through `redactLine` with the app's schema before i
 `source: "edge"` (D46) reads an app's Scaleway Edge Services access log from the stream its `apps.json` entry names under `edge.stream`. Edge lines are plain JSON records without the app envelope (`http_request_method`, `http_client_request_url`, `http_response_code_client`, `http_response_code_origin`, `http_client_country_code`, `waf_action`, `waf_mode`, …), so one `| json` extracts them. For `query_logs("shop", 24, level: "error", action: "GET /api/sync", source: "edge")`:
 
 ```logql
-{resource_name="shop-prod-es"} | json | waf_action != "pass" or http_response_code_origin >= 500 | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""
+{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""
 ```
 
-- `level`: the lines' own `level` is always `info`, so `error` means the origin answered 5xx or the WAF did not pass the request; `info` is the rest. `__error__=""` drops a line whose origin status is not a number rather than failing the count.
+- `level`: the lines' own `level` is always `info`, so the server derives one of three, which partition the lines:
+  - `error`: the origin or the client status is 500 or above.
+  - `waf`: `waf_action` is `block` and neither status is 5xx. In `log_only` mode this is a request the WAF would have blocked; the origin still answered it. WAF hits are kept apart from errors because a `log_only` WAF marks many requests the origin served normally (in one deployment about 4% of requests over 7 days).
+  - `info`: the rest, including a `waf_action` of `-` or none and a status 0 (the client aborted).
+
+  `__error__=""` drops a line whose status is not a number rather than failing the count.
 - `action`, `level` and `status`: derived from the redacted line (D52), so every line leaves only through `redactLine`. An edge line has no action, so the server derives `<METHOD> <path>`: the path of the URL the schema scrubbed as text, without query or fragment, so personal data in a path cannot get around the schema. The `action` filter takes the same form.
 - Redaction: every line goes through `redactLine` with [`schemas/edge.hyde-json.json`](schemas/edge.hyde-json.json), committed here because no app writes these lines: the client IP and Scaleway's `pipeline_id` and `project_id` are hidden, the URL is `text` (its query string becomes `?[query]`), every other field is visible. `payload` is the whole redacted line. The server does not start without the file.
-- `count_errors` groups by origin status and `<METHOD> <path>`.
+- `count_errors` counts `level` `error` lines only, grouped by origin status and `<METHOD> <path>`. For WAF hits use `query_logs` with `level: "waf"`.
 - An app without `edge` in `apps.json` answers `<app> is not configured: no edge stream in apps.json` at both tools, before Loki is asked (D53). The edge stream has no environment override. The app's own log schema is not needed for its edge source.
 
 ## SQL tools
@@ -150,11 +170,11 @@ redactLine(raw, schema); // → { envelope?, format: "json" | "text", line }
 
 ## Log field schemas
 
-Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, for example `prisma/hyde-json.json` next to the app's Prisma schema (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
+Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, for example `prisma/hyde-json.json` next to the app's Prisma schema (D23). The server fetches it at runtime from the repo's default branch and refreshes it ([Per-app readiness](#per-app-readiness), D58). For local runs without a token, `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
 
-`schemas/` is gitignored except its README and `edge.hyde-json.json` ([Edge access logs](#edge-access-logs)): the app repos own the other files. At startup, `loadSchemas(registry)` in [`src/schemas.ts`](src/schemas.ts) reads those present for the registered apps, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests build the log sources from injected schemas and give them a Loki client with a fake `fetch`.
+`schemas/` is gitignored except its README and `edge.hyde-json.json` ([Edge access logs](#edge-access-logs)): the app repos own the other files. The schema store in [`src/schema-store.ts`](src/schema-store.ts) validates every file it loads with `parseSchema` and checks that its `app` matches the name it is registered under ([`src/schemas.ts`](src/schemas.ts)); an invalid file is a `warn` line and the last good one stays. An app with none loaded is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests build the log sources from injected schemas and give them a Loki client with a fake `fetch`.
 
-A field an app starts logging without declaring it shows up as `[hidden]` until the app's schema declares it and `pnpm schemas` has run again.
+A field an app starts logging without declaring it shows up as `[hidden]` until the app's schema declares it on its default branch and the next refresh has run.
 
 ## Tests
 
@@ -208,6 +228,7 @@ The global keys are listed in `infra/base.yaml`. Each app's two keys are derived
 | --- | --- | --- |
 | `COCKPIT_LOGS_URL` | plain | The Cockpit logs (Loki) data source URL, `https://<id>.logs.cockpit.fr-par.scw.cloud` |
 | `COCKPIT_LOGS_READ_TOKEN` | secret | Cockpit token, scope `read_only_logs` (D20) |
+| `APP_REPOS_READ_TOKEN` | secret | Fine-grained PAT or GitHub App token with Contents: read on every app repo `apps.json` registers; the server fetches the apps' schema files with it at runtime (D58) |
 | `HYDE_TOKEN_CLAUDE_CODE` | secret | Claude Code's bearer token, `openssl rand -hex 32` |
 | `HYDE_TOKEN_CLAUDE_CODE_APPS` | plain | The apps Claude Code may read: comma-separated `apps.json` names, or `*` (D39) |
 | `HYDE_TOKEN_AGENT` | secret | The agent runner's bearer token (D5), `openssl rand -hex 32` |
@@ -231,19 +252,18 @@ Secret values land in `secret-environment-variables`, which `scw` returns only a
 
 ### Deploy workflow
 
-`.github/workflows/deploy.yml` runs on every push to `main`: fetch `schemas/` (`pnpm schemas`, `pnpm fetch:redacted-schemas`), verify the credential's target, build `Dockerfile`, push `<registryEndpoint>/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
+`.github/workflows/deploy.yml` runs on every push to `main`: verify the credential's target, build `Dockerfile`, push `<registryEndpoint>/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
 
-A manual run with `build_only` (`gh workflow run deploy.yml -f build_only=true`) runs whatever that variable says, and only fetches `schemas/`, verifies the credential's target, builds and pushes `<sha>` and `manual-<sha>` (it never moves `latest`). It runs no apply, diff or smoke check and writes the command for the local apply, `HYDE_IMAGE_TAG=<sha> pnpm infra:apply`, to the job summary (D44).
+A manual run with `build_only` (`gh workflow run deploy.yml -f build_only=true`) runs whatever that variable says, and only verifies the credential's target, builds and pushes `<sha>` and `manual-<sha>` (it never moves `latest`). It runs no apply, diff or smoke check and writes the command for the local apply, `HYDE_IMAGE_TAG=<sha> pnpm infra:apply`, to the job summary (D44).
 
-The workflow reads five repository secrets, none of them a runtime value of the server:
+The workflow reads four repository secrets, none of them a runtime value of the server:
 
 | Secret | Used for |
 | --- | --- |
 | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | The deploy IAM application's key: registry push, `apply`, `diff` |
 | `HYDE_APPS_JSON`, `HYDE_PRODUCTION_YAML` | The operator files `apps.json` and `infra/environments/production.yaml`, verbatim ([Operator files](#operator-files)). The first step writes them and masks every value they hold in the log |
-| `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `apps.json` registers, for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on each; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
 
-`schemas/` is gitignored but its README and the edge schema. The `Dockerfile` copies it with the rest of the tree, warns for every app missing `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md`, and stops the build when no app has both (D37).
+The workflow fetches no schema and the image holds none: `.dockerignore` keeps `schemas/` out of the build context but for the committed edge schema, and the server fetches the app schemas at runtime with its container secret `APP_REPOS_READ_TOKEN` (D58). A schema change in an app repo therefore needs no workflow run; the container picks it up at its next refresh.
 
 ### First deploy
 
@@ -254,13 +274,13 @@ Gather first (a human, once):
   ```sh
   scw cockpit data-source list region=fr-par -o json | jq -r '.[] | select(.type == "logs") | .url'
   ```
-- **The app-repo read token**: a fine-grained PAT or GitHub App token with Contents: read on every app repo `apps.json` registers.
+- **The app-repo read token**, into `APP_REPOS_READ_TOKEN` in `apply.env`: a fine-grained PAT or GitHub App token with Contents: read on every app repo `apps.json` registers. The container fetches the schema files with it (D58).
 
 Then:
 
 1. In the apps' Scaleway organisation, create an IAM application `hyde-mcp-gateway-deploy` with a policy granting `ContainersFullAccess` and `ContainerRegistryFullAccess`, and one API key for it.
 2. Set that key as repository secrets `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`. Repository secrets override the organisation-level pair; without them the workflow fails at the organisation check.
-3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`, and the contents of `apps.json` and `infra/environments/production.yaml` as `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` (`gh secret set HYDE_APPS_JSON < apps.json`). Without them the workflow fails at the first step or the schema fetch.
+3. Set the contents of `apps.json` and `infra/environments/production.yaml` as repository secrets `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` (`gh secret set HYDE_APPS_JSON < apps.json`). Without them the workflow fails at the first step.
 4. Write `apps.json` and `infra/environments/production.yaml` from their examples ([Operator files](#operator-files)), and `apply.env` with every required key above and both keys of each app to configure.
 5. Push the first image. No Docker needed on your machine: run the workflow in build-only mode on `main` and wait for it to finish:
    ```sh
@@ -273,10 +293,8 @@ Then:
    HYDE_IMAGE_TAG=<sha> pnpm infra:apply     # prints containerId= and endpoint=
    pnpm infra:diff
    ```
-   **Alternative, with Docker locally** instead of steps 5 and 6: fetch the schemas, push the image and create the container yourself, with a `gh` login (or `GITHUB_TOKEN`) that can read both app repos:
+   **Alternative, with Docker locally** instead of steps 5 and 6: push the image and create the container yourself (local `schemas/` files stay out of the image):
    ```sh
-   pnpm schemas                  # schemas/<app>.hyde-json.json
-   pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md
    tag=$(git rev-parse HEAD)
    echo "$SCW_SECRET_KEY" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
    image=$(node scripts/infra/apply.ts target production | sed -n 's/^image=//p')

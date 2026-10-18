@@ -11,7 +11,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Json } from "hyde-json";
 import { z } from "zod";
 import { LokiError, nsOf, type Loki } from "../loki.ts";
-import { KINDS, SOURCES, type LogFilter, type LogReader, type LogSources, type Source } from "../sources/index.ts";
+import { KINDS, LEVELS, SOURCES, type LogFilter, type LogReader, type LogSources, type Source } from "../sources/index.ts";
 import { appSchema, error, forApp, notConfigured, text, type Gate, type Registrar } from "./tool.ts";
 
 export const MAX_HOURS = 168;
@@ -67,7 +67,8 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
       inputSchema: {
         app: appSchema(gate.registry),
         hours,
-        level: z.enum(["error", "info"]).optional().describe('Only lines of this level: "error" or "info"'),
+        level: z.enum(LEVELS).optional()
+          .describe(`Only lines of this level: "error" or "info"${KINDS.map((k) => (k.describe.level ? `; ${k.describe.level}` : "")).join("")}`),
         action: z.string().optional()
           .describe(`Only lines of this action: ${KINDS.map((k) => k.describe.action).join(", or ")}`),
         limit: z.number().int().min(1).max(MAX_LIMIT, `limit must be at most ${MAX_LIMIT}`).default(100)
@@ -108,14 +109,18 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
       return guard(async () => {
         const entries = await loki.queryRange(query.logql, { ...window(h), limit: ERROR_SCAN_LIMIT });
         const groups = new Map<string, { row: Record<string, Json>; count: number }>();
+        let total = 0;
         for (const entry of entries) {
-          const { key, row } = reader.group(entry);
+          const grouped = reader.group(entry);
+          if (!grouped) continue;
+          total += 1;
+          const { key, row } = grouped;
           const group = groups.get(key) ?? groups.set(key, { row, count: 0 }).get(key)!;
           group.count += 1;
         }
         const rows = [...groups].sort(([ka, a], [kb, b]) => b.count - a.count || ka.localeCompare(kb))
           .map(([, { row, count }]) => ({ ...row, count }));
-        return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
+        return { rows, total, partial: entries.length >= ERROR_SCAN_LIMIT };
       });
     }),
   );

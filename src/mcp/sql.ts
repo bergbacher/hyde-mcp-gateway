@@ -1,8 +1,9 @@
 // The SQL tools: `describe_schema` and `query_sql` read the app's redacted
 // database (D2), whose privileges are the boundary, and its redacted schema.
-// Whether an app has both is asked once of its SQL readiness (sqlReadiness,
-// built at boot, src/boot.ts); an app that lacks either is refused before the
-// database is asked (D37).
+// Whether an app has both is asked of its SQL readiness (sqlReadiness, built
+// once at boot, src/boot.ts), which reads the schema store's live map per
+// call (D58); an app that lacks either is refused before the database is
+// asked (D37).
 
 import { z } from "zod";
 import { guardStatement } from "../db/guard.ts";
@@ -12,7 +13,7 @@ import { appSchema, error, forApp, notConfigured, text, type Gate, type Registra
 
 export interface SqlInputs {
   databases: Databases;
-  /** Each app's redacted-schema.md, loaded at boot; a missing app is left out (D37). */
+  /** Each app's redacted-schema.md: the schema store's live map (D58), read per call, so a refresh changes readiness; a missing app is left out (D37). */
   schemas: ReadonlyMap<App, string>;
 }
 
@@ -32,7 +33,7 @@ export interface SqlReadiness {
 /** The SQL readiness of every app: a question to the database module plus the redacted schemas. */
 export function sqlReadiness({ databases, schemas }: SqlInputs): SqlReadiness {
   const missing = (app: App) => [
-    ...(schemas.has(app) ? [] : [`schemas/${app}.redacted-schema.md is missing`]),
+    ...(schemas.has(app) ? [] : ["redacted schema is missing"]),
     ...(databases.has(app) ? [] : [`${appVariables(app).redactedUrl} is not set`]),
   ];
   return {
