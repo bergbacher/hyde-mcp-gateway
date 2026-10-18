@@ -51,7 +51,7 @@ export function forApp<A extends { app: string }>(
 
 export interface SqlOptions {
   databases: Databases;
-  /** Each app's redacted-schema.md, loaded at startup; a missing app is left out and refused (D37). */
+  /** Each app's redacted-schema.md, read per call (the schema store's live map, D58); a missing app is left out and refused (D37). */
   schemas: ReadonlyMap<App, string>;
 }
 
@@ -100,7 +100,7 @@ export function createServer(principal: Principal, options: ServerOptions): McpS
 /** What `app` lacks for `describe_schema` and `query_sql`, as their error names it; empty when ready. */
 export function sqlMissing(app: App, sql: SqlOptions | undefined): string[] {
   return [
-    ...(sql?.schemas.has(app) ? [] : [`schemas/${app}.redacted-schema.md is missing`]),
+    ...(sql?.schemas.has(app) ? [] : ["redacted schema is missing"]),
     ...(sql?.databases.has(app) ? [] : [`${appVariables(app).redactedUrl} is not set`]),
   ];
 }

@@ -17,24 +17,16 @@ RUN corepack enable
 #
 # The tree includes apps.json, the app registry the server reads at startup,
 # an operator file that is not committed (D38; the deploy workflow writes it
-# from a repository secret), and schemas/, not committed but for
-# edge.hyde-json.json (D46): `pnpm schemas` (log field
-# schemas) and `pnpm fetch:redacted-schemas` (redacted-schema.md) fill it from
-# the app repos' main before the build (deploy.yml; README, First deploy). The
-# server serves the registered apps whose files are present (D37); an app
-# without them is refused at its tools. An image that could serve no app is
-# useless, so the build stops unless at least one app in apps.json has its
-# complete pair: schemas/<app>.hyde-json.json and schemas/<app>.redacted-schema.md.
+# from a repository secret). It holds no app schema: the server fetches each
+# app's log field schema and redacted schema from its repo at runtime and
+# refreshes them on a schedule (D58, src/schema-store.ts), so a schema change
+# needs no image. .dockerignore keeps schemas/ out but for the committed
+# edge.hyde-json.json (D46), so files a local `pnpm schemas` wrote cannot
+# reach the image.
 COPY . .
 RUN test -s apps.json || { echo "apps.json is missing: copy apps.example.json to apps.json and register your apps; the server cannot start without its app registry" >&2; exit 1; }; \
     apps=$(node -e 'console.log(Object.keys(JSON.parse(require("fs").readFileSync("apps.json", "utf8")).apps).join(" "))') || { echo "apps.json is not a registry" >&2; exit 1; }; \
-    ready=""; \
-    for app in $apps; do \
-      if test -s "schemas/$app.hyde-json.json" && test -s "schemas/$app.redacted-schema.md"; then ready="$ready $app"; \
-      else echo "warning: $app is not configured: schemas/$app.hyde-json.json or schemas/$app.redacted-schema.md is missing" >&2; fi; \
-    done; \
-    test -n "$ready" || { echo "no app has both schema files: run pnpm schemas and pnpm fetch:redacted-schemas before docker build" >&2; exit 1; }; \
-    echo "apps with schemas:$ready"
+    echo "apps: $apps"
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod
 

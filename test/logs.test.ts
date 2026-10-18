@@ -230,7 +230,7 @@ describe("an app without a log schema (D37)", () => {
     for (const tool of ["query_logs", "count_errors"]) {
       const result = await call(tool, { app: "shop" });
       expect(result.isError).toBe(true);
-      expect(result.text).toBe("shop is not configured: schemas/shop.hyde-json.json is missing");
+      expect(result.text).toBe("shop is not configured: log schema is missing");
     }
     expect(requests).toHaveLength(0);
     expect((await call("count_errors", { app: "crm" })).isError).toBe(false);

@@ -44,7 +44,7 @@ export const APP_ACTION = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/;
 export const EDGE_ACTION = /^([A-Z]{3,7}) (\/[A-Za-z0-9_.~%:@+\/-]{0,200})$/;
 
 export interface LogsOptions {
-  /** The log schemas present; an app left out is refused (D37). */
+  /** The log schemas, read per call (the schema store's live map, D58); an app left out is refused (D37). */
   schemas: Schemas;
   /** The committed edge schema (D46); without it `source: "edge"` is refused as not configured. */
   edgeSchema?: LogSchema;
@@ -125,7 +125,7 @@ const hours = z.number().positive("hours must be positive")
 /** What `app` lacks for the log tools, as their error names it; empty when ready. */
 export function logsMissing(app: App, logs: Pick<LogsOptions, "schemas" | "sources"> | undefined): string[] {
   return [
-    ...(logs?.schemas.has(app) ? [] : [`schemas/${app}.hyde-json.json is missing`]),
+    ...(logs?.schemas.has(app) ? [] : ["log schema is missing"]),
     ...(logs?.sources.has(app) ? [] : ["no Loki stream"]),
   ];
 }

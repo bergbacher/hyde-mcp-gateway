@@ -37,6 +37,7 @@ describe("committed infra/", () => {
     expect(Object.fromEntries(config.variables.map(({ name, required, secret }) => [name, flags(required, secret)]))).toEqual({
       COCKPIT_LOGS_URL: flags(true, false),
       COCKPIT_LOGS_READ_TOKEN: flags(true, true),
+      APP_REPOS_READ_TOKEN: flags(true, true),
       HYDE_TOKEN_CLAUDE_CODE: flags(true, true),
       HYDE_TOKEN_CLAUDE_CODE_APPS: flags(true, false),
       HYDE_TOKEN_AGENT: flags(true, true),
@@ -97,53 +98,46 @@ describe("Dockerfile", () => {
     expect(dockerfile).toMatch(/pnpm install --frozen-lockfile --prod/);
   });
 
-  it("copies apps.json and the fetched schemas/ into the image", () => {
-    expect(read(".dockerignore").split("\n").some((line) => /^!?(schemas|apps\.json)/.test(line.trim()))).toBe(false);
+  it("copies apps.json and the edge schema into the image, no app schema (D58)", () => {
+    const ignored = read(".dockerignore").split("\n").map((line) => line.trim());
+    expect(ignored.some((line) => /^!?apps\.json/.test(line))).toBe(false);
+    expect(ignored).toEqual(expect.arrayContaining(["schemas/*", "!schemas/edge.hyde-json.json"]));
+    expect(ignored.filter((line) => line.startsWith("!"))).toEqual(["!schemas/edge.hyde-json.json"]);
     expect(dockerfile).toMatch(/^COPY \. \.$/m);
+    // No schema check: the image never holds an app's schema files.
+    expect(dockerfile).not.toMatch(/schemas\/\$app|redacted-schema\.md/);
   });
 
-  // The schema check, run with sh in a scratch directory per case (D37).
+  // The registry check, run with sh in a scratch directory per case.
   const check = (() => {
     const lines = dockerfile.split("\n");
     const start = lines.findIndex((l) => l.startsWith("RUN test -s apps.json"));
     const end = lines.findIndex((l, i) => i >= start && !l.endsWith("\\"));
     return lines.slice(start, end + 1).join("\n").replace(/^RUN /, "").replaceAll("\\\n", "\n");
   })();
-  const build = (files: string[], registry: string | null = read("apps.example.json")) => {
+  const build = (registry: string | null) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hyde-docker-"));
     if (registry !== null) fs.writeFileSync(path.join(dir, "apps.json"), registry);
-    fs.mkdirSync(path.join(dir, "schemas"));
-    for (const file of files) fs.writeFileSync(path.join(dir, "schemas", file), "x\n");
     const run = spawnSync("sh", ["-c", check], { cwd: dir, encoding: "utf8" });
     fs.rmSync(dir, { recursive: true, force: true });
     return { status: run.status, out: `${run.stdout}${run.stderr}` };
   };
 
-  it("builds with one app's complete pair, warning for the other", () => {
-    const shop = build(["shop.hyde-json.json", "shop.redacted-schema.md"]);
-    expect(shop.status).toBe(0);
-    expect(shop.out).toMatch(/apps with schemas: shop\n/);
-    expect(shop.out).toMatch(/warning: crm is not configured/);
-    const both = build(["shop.hyde-json.json", "shop.redacted-schema.md", "crm.hyde-json.json", "crm.redacted-schema.md"]);
-    expect(both).toMatchObject({ status: 0 });
-    expect(both.out).toMatch(/apps with schemas: shop crm/);
+  it("builds with apps.json alone, no schema file (D58)", () => {
+    const example = build(read("apps.example.json"));
+    expect(example.status).toBe(0);
+    expect(example.out).toMatch(/apps: shop crm\n/);
+    const third = build(JSON.stringify({ apps: { "help-desk": {} } }));
+    expect(third).toMatchObject({ status: 0, out: "apps: help-desk\n" });
   });
 
-  it("takes the apps from apps.json", () => {
-    const third = JSON.stringify({ apps: { "help-desk": {} } });
-    const helpDesk = build(["help-desk.hyde-json.json", "help-desk.redacted-schema.md"], third);
-    expect(helpDesk.status).toBe(0);
-    expect(helpDesk.out).toMatch(/apps with schemas: help-desk\n/);
-    // shop's pair is no use when apps.json does not register shop.
-    expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], third).status).not.toBe(0);
-    expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], null).out).toMatch(/apps\.json is missing/);
-  });
-
-  it("refuses to build when no app has its complete pair", () => {
-    expect(build([]).status).not.toBe(0);
-    const split = build(["shop.hyde-json.json", "crm.redacted-schema.md"]);
-    expect(split.status).not.toBe(0);
-    expect(split.out).toMatch(/no app has both schema files/);
+  it("refuses to build without apps.json or with one that is not a registry", () => {
+    const missing = build(null);
+    expect(missing.status).not.toBe(0);
+    expect(missing.out).toMatch(/apps\.json is missing/);
+    const broken = build("{ not json");
+    expect(broken.status).not.toBe(0);
+    expect(broken.out).toMatch(/apps\.json is not a registry/);
   });
 
   it("cannot copy apply.env or .env files into the image", () => {
@@ -158,23 +152,19 @@ describe("secrets stay out of the repository", () => {
     expect(ignored).toEqual(expect.arrayContaining(["apply.env", "apps.json", "infra/environments/*.yaml", "!infra/environments/*.example.yaml"]));
   });
 
-  it("the deploy workflow reads no runtime secret: only the scw key pair, the operator files and the app-repo read token", () => {
+  it("the deploy workflow reads no runtime secret: only the scw key pair and the operator files", () => {
     const workflow = read(".github/workflows/deploy.yml");
     const secrets = [...workflow.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]);
-    expect([...new Set(secrets)].sort()).toEqual(["APP_REPOS_READ_TOKEN", "HYDE_APPS_JSON", "HYDE_PRODUCTION_YAML", "SCW_ACCESS_KEY", "SCW_SECRET_KEY"]);
+    expect([...new Set(secrets)].sort()).toEqual(["HYDE_APPS_JSON", "HYDE_PRODUCTION_YAML", "SCW_ACCESS_KEY", "SCW_SECRET_KEY"]);
     expect(workflow).toContain("apply production --keep-secrets");
     expect(workflow).toContain("diff production --strict");
   });
 
-  it("the deploy workflow fetches both schema kinds before building the image, from the path context", () => {
+  it("the deploy workflow fetches no schema (D58) and builds from the path context", () => {
     const workflow = read(".github/workflows/deploy.yml");
-    const build = workflow.indexOf("docker/build-push-action");
-    for (const step of ["pnpm schemas", "pnpm fetch:redacted-schemas"]) {
-      expect(workflow.indexOf(step)).toBeGreaterThan(-1);
-      expect(workflow.indexOf(step)).toBeLessThan(build);
-    }
-    // A repository context would build from the commit, without the untracked schemas/.
-    expect(workflow.slice(build)).toMatch(/context: \.\n/);
+    for (const step of ["pnpm schemas", "pnpm fetch:redacted-schemas", "GITHUB_TOKEN", "GH_TOKEN"]) expect(workflow).not.toContain(step);
+    // A repository context would build from the commit, without the untracked apps.json.
+    expect(workflow.slice(workflow.indexOf("docker/build-push-action"))).toMatch(/context: \.\n/);
   });
 
   // D44: a manual build-only run pushes the image for the first local apply and never touches the container.

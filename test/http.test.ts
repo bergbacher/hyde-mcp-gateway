@@ -7,7 +7,9 @@ import { logSources, readConfig } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import type { Loki } from "../src/loki.ts";
 import type { TokenVerifier } from "../src/mcp/auth.ts";
-import { loadSchemas } from "../src/schemas.ts";
+import { readFileSync } from "node:fs";
+import { parseSchema } from "hyde-json";
+import type { Schemas } from "../src/schemas.ts";
 import { REGISTRY } from "./helpers.ts";
 
 const TOKEN = "t".repeat(40);
@@ -38,6 +40,11 @@ async function ping(client: Client, app: string) {
   const result = await client.callTool({ name: "ping", arguments: { app } });
   const text = (result.content as { text: string }[])[0]!.text;
   return { isError: result.isError === true, text };
+}
+
+function fixtureSchemas(): Schemas {
+  const dir = new URL("./fixtures/schemas/", import.meta.url);
+  return new Map(["shop", "crm"].map((app) => [app, parseSchema(JSON.parse(readFileSync(fileURLToPath(new URL(`${app}.hyde-json.json`, dir)), "utf8")))]));
 }
 
 describe("http with static tokens", () => {
@@ -147,7 +154,7 @@ describe("http with GitHub tokens (D59)", () => {
   const app = createApp(config, {
     registry: REGISTRY,
     logs: {
-      schemas: loadSchemas(REGISTRY, fileURLToPath(new URL("./fixtures/schemas/", import.meta.url))),
+      schemas: fixtureSchemas(),
       loki,
       sources: logSources(REGISTRY),
     },
