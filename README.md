@@ -6,15 +6,19 @@ Agents read the production logs and databases of shop and crm without seeing per
 
 ```sh
 pnpm install
-pnpm schemas                  # required: schemas/<app>.hyde-json.json; needs GITHUB_TOKEN or a `gh` login with read access to both app repos
-pnpm fetch:redacted-schemas   # optional: schemas/<app>.redacted-schema.md for describe_schema
+pnpm schemas                  # schemas/<app>.hyde-json.json for the log tools; needs GITHUB_TOKEN or a `gh` login with read access to the app repos
+pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md for describe_schema and query_sql
 HYDE_TOKEN_CLAUDE_CODE=$(openssl rand -hex 32) \
 COCKPIT_LOGS_URL=https://<id>.logs.cockpit.fr-par.scw.cloud \
 COCKPIT_LOGS_READ_TOKEN=<read_only_logs token> \
 pnpm dev
 ```
 
-The server refuses to start until `schemas/` holds both apps' log field schemas (see [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md)). Redacted schemas are optional, and so are database URLs outside production.
+Both fetch scripts take `--app shop` or `--app crm` (repeatable) to fetch only those apps, and `--strict` to fail when any requested app is missing. The server refuses to start only when `schemas/` holds no log field schema at all, or a present one is invalid (see [Log field schemas](#log-field-schemas) and [`schemas/`](schemas/README.md)).
+
+### Per-app readiness
+
+The server starts with the apps whose files are present (LEDGER D37). An app answers the log tools when `schemas/<app>.hyde-json.json` exists, and `describe_schema` and `query_sql` when `schemas/<app>.redacted-schema.md` exists and `<APP>_REDACTED_URL` is set. Otherwise each of those tools returns the tool error `<app> is not configured: <what is missing>`, for example `crm is not configured: schemas/crm.hyde-json.json is missing`, before it reads anything, so an app without its schema can leak nothing. The startup line lists under `apps` what each app answers (`logs`, `sql`) and a `warn` line follows for every app that is not fully configured. So shop can go live while crm waits: `pnpm schemas --app shop`, `pnpm fetch:redacted-schemas --app shop`, the reader wizard with `--app shop`, and only `SHOP_*` database variables. The image needs at least one app with both schema files.
 
 The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters). `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
@@ -46,7 +50,7 @@ Client setup, issuing and rotating client tokens, and a first analysis: [`docs/r
 | `CRM_REDACTED_URL`, `SHOP_REDACTED_URL` | The redacted reader's connection string, `mysql://<user>:<password>@<host>:3306/redacted?ssl=true`. The only parameter is `ssl`; the database is always `redacted`. |
 | `CRM_DATABASE_CA`, `SHOP_DATABASE_CA` | The RDB instance's CA certificate, PEM text (`scw rdb instance get-certificate`). Required with `ssl=true`. |
 | `CRM_DATABASE_CERT_NAME`, `SHOP_DATABASE_CERT_NAME` | The name the instance certificate carries, the bare instance id. Required with `ssl=true`. |
-| `NODE_ENV` | `production` requires both apps' URLs with `ssl=true`, CA and certificate name, or the server does not start. |
+| `NODE_ENV` | `production` requires, for every app whose URL is set, `ssl=true`, CA and certificate name, or the server does not start. An app without a URL is not configured for SQL (D37). |
 
 ## Log tools
 
@@ -64,7 +68,7 @@ Every line Loki returns goes through `redactLine` with the app's schema before i
 
 `query_sql` connects as the redacted reader to database `redacted`, whose privileges are the boundary: hidden columns and base tables are refused by MySQL, and its error text ("Unknown column ...") comes back unchanged as a tool error. Before reaching the database the server refuses anything but a single `SELECT`: no second statement, no semicolon but one trailing, none inside a comment, no executable comment (`/*! */`). A run is bounded by a 15 s statement timeout, a row cap (`limit`, default 200, clamped to 1–1000) and a 1 MB result cap; `truncated` says a cap cut the result. Binary values come back as hex, `BIGINT` and `DECIMAL` as strings, dates as MySQL's text.
 
-TLS follows the apps' runtime: the server certificate is verified against the instance CA, and its identity is checked against `<APP>_DATABASE_CERT_NAME` rather than the host, since the instance certificate names neither the endpoint host nor its address. Without `ssl=true` (outside production) the connection is plain, for a local MySQL. Outside production an app without a URL answers `query_sql` with an error.
+TLS follows the apps' runtime: the server certificate is verified against the instance CA, and its identity is checked against `<APP>_DATABASE_CERT_NAME` rather than the host, since the instance certificate names neither the endpoint host nor its address. Without `ssl=true` (outside production) the connection is plain, for a local MySQL. An app without a URL or without its redacted schema answers `describe_schema` and `query_sql` that it is not configured ([Per-app readiness](#per-app-readiness)).
 
 ## hyde-json
 
@@ -89,9 +93,9 @@ redactLine(raw, schema); // → { envelope?, format: "json" | "text", line }
 
 ## Log field schemas
 
-Each app declares its log field schema as `prisma/hyde-json.json` in its own repo (crm, shop), next to its Prisma schema (D23). `pnpm schemas` downloads both from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json`, validates them with `parseSchema`, and exits non-zero without writing anything when one is missing or invalid. Auth is `GITHUB_TOKEN`, else the token of a logged-in `gh`. The container build, once it exists, runs `pnpm schemas` before packaging the server.
+Each app declares its log field schema as `prisma/hyde-json.json` in its own repo (crm, shop), next to its Prisma schema (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for `prisma/redacted/redacted-schema.md`.
 
-`schemas/` is gitignored except its README: the app repos own the files. At startup, `loadSchemas()` in [`src/schemas.ts`](src/schemas.ts) reads both, checks that each file's `app` matches its name, and throws when one is missing, so the server never runs without them. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
+`schemas/` is gitignored except its README: the app repos own the files. At startup, `loadSchemas()` in [`src/schemas.ts`](src/schemas.ts) reads those present, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
 
 A field an app starts logging without declaring it shows up as `[hidden]` until the app's schema declares it and `pnpm schemas` has run again.
 
@@ -168,7 +172,7 @@ MIID...
 -----END CERTIFICATE-----"
 ```
 
-Secret values land in `secret-environment-variables`, which `scw` returns only as a digest; plain ones in `environment-variables`. `diff` compares names, never values, so a rotation is never drift. A failing `scw` command is printed with every secret argument redacted. The image runs with `NODE_ENV=production`, in which the server refuses to start without both apps' URL (`ssl=true`), CA and certificate name.
+Secret values land in `secret-environment-variables`, which `scw` returns only as a digest; plain ones in `environment-variables`. `diff` compares names, never values, so a rotation is never drift. A failing `scw` command is printed with every secret argument redacted. The image runs with `NODE_ENV=production`, in which the server refuses to start when an app's URL is set without `ssl=true`, its CA or its certificate name. `infra/base.yaml` still declares both apps' database variables required, so `apply` asks for all of them.
 
 ### Deploy workflow
 
@@ -181,7 +185,7 @@ The workflow reads three repository secrets, none of them a runtime value of the
 | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | The deploy IAM application's key: registry push, `apply`, `diff` |
 | `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `example-org/crm` and `example-org/shop` for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on both; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
 
-`schemas/` is gitignored but its README. The `Dockerfile` copies it with the rest of the tree and stops the build when one of `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md` is missing.
+`schemas/` is gitignored but its README. The `Dockerfile` copies it with the rest of the tree, warns for every app missing `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md`, and stops the build when no app has both (D37).
 
 ### First deploy
 

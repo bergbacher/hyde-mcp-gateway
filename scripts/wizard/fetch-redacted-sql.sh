@@ -6,28 +6,36 @@
 #   prisma/redacted/redacted-views-drop.sql  hyde-db drop script
 #   lib/database-ca.ts                       instance CA, extracted to ca.pem
 #
-#   bash scripts/wizard/fetch-redacted-sql.sh [--ref <git-ref>] [--out <dir>]
+#   bash scripts/wizard/fetch-redacted-sql.sh [--app shop|crm]... [--ref <git-ref>] [--out <dir>]
 #
-# --ref defaults to main; --out to .redacted-sql/ (gitignored). The CA comes
-# from CRM_CA_REF / SHOP_CA_REF when set, else from --ref: crm's
+# --app (repeatable) fetches only that app (D37); without it, both. --ref
+# defaults to main; --out to .redacted-sql/ (gitignored). The CA comes from
+# CRM_CA_REF / SHOP_CA_REF when set, else from --ref: crm's
 # lib/database-ca.ts reaches main only with its Scaleway migration, so until
-# then pass CRM_CA_REF=production. Writes <out>/crm/ and
-# <out>/shop/, each with redacted-views.sql, redacted-views-drop.sql and
-# ca.pem. Needs gh, logged in with read access to both repos. Nothing secret
-# is fetched.
+# then pass CRM_CA_REF=production. Writes <out>/<app>/ per
+# app, with redacted-views.sql, redacted-views-drop.sql and ca.pem. Needs gh,
+# logged in with read access to the selected apps' repos. Nothing secret is
+# fetched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REF=main
 OUT="$ROOT/.redacted-sql"
+APPS=()
 
 while (($#)); do
   case "$1" in
+    --app)
+      case "${2:-}" in
+        crm|shop) [[ " ${APPS[*]-} " == *" $2 "* ]] || APPS+=("$2"); shift 2 ;;
+        *) printf 'error: --app needs crm or shop\n' >&2; exit 2 ;;
+      esac ;;
     --ref) REF="${2:?--ref needs a value}"; shift 2 ;;
     --out) OUT="${2:?--out needs a value}"; shift 2 ;;
-    *) sed -n '2,17p' "$0"; exit 2 ;;
+    *) sed -n '2,19p' "$0"; exit 2 ;;
   esac
 done
+((${#APPS[@]})) || APPS=(crm shop)
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v gh >/dev/null 2>&1 || die "gh is not installed"
@@ -39,9 +47,8 @@ fetch() {
   [[ -s "$3" ]] || die "$2 from $1 at $4 is empty"
 }
 
-for pair in crm:example-org/crm shop:example-org/shop; do
-  app="${pair%%:*}"
-  repo="${pair#*:}"
+for app in "${APPS[@]}"; do
+  if [[ "$app" == crm ]]; then repo=example-org/crm; else repo=example-org/shop; fi
   dir="$OUT/$app"
   ca_ref="$REF"
   if [[ "$app" == crm ]]; then ca_ref="${CRM_CA_REF:-$REF}"; else ca_ref="${SHOP_CA_REF:-$REF}"; fi
@@ -60,5 +67,7 @@ for pair in crm:example-org/crm shop:example-org/shop; do
   printf 'ok   %s (%s@%s) → %s\n' "$app" "$repo" "$REF" "$dir"
 done
 
-printf '\nNext:\n  bash scripts/wizard/redacted-reader.sh %s %s\n' \
-  "${OUT#"$ROOT"/}/crm/redacted-views.sql" "${OUT#"$ROOT"/}/shop/redacted-views.sql"
+next="bash scripts/wizard/redacted-reader.sh"
+if ((${#APPS[@]} == 1)); then next+=" --app ${APPS[0]}"; fi
+for app in "${APPS[@]}"; do next+=" ${OUT#"$ROOT"/}/$app/redacted-views.sql"; done
+printf '\nNext:\n  %s\n' "$next"

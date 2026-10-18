@@ -28,14 +28,14 @@ describe("describe_schema", () => {
     expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop redacted schema\n");
     const missing = await client.callTool({ name: "describe_schema", arguments: { app: "crm" } });
     expect(missing.isError).toBe(true);
-    expect(textOf(missing)).toMatch(/crm\.redacted-schema\.md/);
+    expect(textOf(missing)).toBe("crm is not configured: schemas/crm.redacted-schema.md is missing");
     await client.close();
   });
 });
 
 describe("query_sql", () => {
   it("refuses a write or two statements before reaching the database", async () => {
-    const client = await connectInMemory({ sql: { databases: untouchable, schemas: {} } });
+    const client = await connectInMemory({ sql: { databases: untouchable, schemas: { crm: "# crm\n" } } });
     for (const sql of ["UPDATE users SET status = 'x'", "SELECT 1; SELECT 2"]) {
       const result = await client.callTool({ name: "query_sql", arguments: { app: "crm", sql } });
       expect(result.isError).toBe(true);
@@ -44,12 +44,22 @@ describe("query_sql", () => {
     await client.close();
   });
 
-  it("reports an app without a database as a tool error", async () => {
-    const none: Databases = { ...untouchable, has: () => false };
-    const client = await connectInMemory({ sql: { databases: none, schemas: {} } });
-    const result = await client.callTool({ name: "query_sql", arguments: { app: "shop", sql: "SELECT 1" } });
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toMatch(/SHOP_REDACTED_URL/);
+  it("refuses an app without a database URL or redacted schema at both tools, before the database (D37)", async () => {
+    const shopOnly: Databases = { ...untouchable, has: (app) => app === "shop" };
+    const client = await connectInMemory({ sql: { databases: shopOnly, schemas: { crm: "# crm\n" } } });
+    const call = (name: string, app: string) => client.callTool({ name, arguments: { app, sql: "SELECT 1" } });
+    for (const name of ["describe_schema", "query_sql"]) {
+      const crm = await call(name, "crm");
+      expect(crm.isError).toBe(true);
+      expect(textOf(crm)).toBe("crm is not configured: CRM_REDACTED_URL is not set");
+      const shop = await call(name, "shop");
+      expect(shop.isError).toBe(true);
+      expect(textOf(shop)).toBe("shop is not configured: schemas/shop.redacted-schema.md is missing");
+    }
+    const none = await connectInMemory({ sql: { databases: { ...untouchable, has: () => false }, schemas: {} } });
+    const both = await none.callTool({ name: "query_sql", arguments: { app: "shop", sql: "UPDATE x SET y = 1" } });
+    expect(textOf(both)).toBe("shop is not configured: schemas/shop.redacted-schema.md is missing; SHOP_REDACTED_URL is not set");
+    await none.close();
     await client.close();
   });
 });

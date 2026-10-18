@@ -23,24 +23,27 @@ afterEach(() => {
 describe("loadSchemas", () => {
   it("loads and validates both apps' schemas", () => {
     const schemas = loadSchemas(FIXTURES);
-    expect(schemas.crm.app).toBe("crm");
-    expect(schemas.crm.fields["message.workspaceId"]).toBe("visible");
-    expect(schemas.shop.fields["message.to"]).toBe("hidden");
-    expect(schemas.shop.passIds).toBe(true);
+    expect(schemas.crm?.app).toBe("crm");
+    expect(schemas.crm?.fields["message.workspaceId"]).toBe("visible");
+    expect(schemas.shop?.fields["message.to"]).toBe("hidden");
+    expect(schemas.shop?.passIds).toBe(true);
   });
 
-  it("throws naming the missing file", () => {
-    const dir = dirWith("crm");
-    expect(() => loadSchemas(dir)).toThrow(/shop: .*shop\.hyde-json\.json is missing/);
-    expect(() => loadSchemas(dir)).toThrow(/pnpm schemas/);
+  it("returns the apps whose file exists and leaves the others out (D37)", () => {
+    const schemas = loadSchemas(dirWith("shop"));
+    expect(Object.keys(schemas)).toEqual(["shop"]);
+    expect(schemas.shop?.app).toBe("shop");
+    expect(schemas.crm).toBeUndefined();
   });
 
   it("throws naming both when neither exists", () => {
     const dir = dirWith();
-    expect(() => loadSchemas(dir)).toThrow(/shop: .* is missing\n.*crm: .* is missing/);
+    expect(() => loadSchemas(dir)).toThrow(/No log schema/);
+    expect(() => loadSchemas(dir)).toThrow(/shop: .*shop\.hyde-json\.json is missing\n.*crm: .* is missing/);
+    expect(() => loadSchemas(dir)).toThrow(/pnpm schemas/);
   });
 
-  it("throws on a file that is not JSON or not a valid schema", () => {
+  it("throws on a present file that is not JSON or not a valid schema, even when the other app is fine", () => {
     const dir = dirWith("crm", "shop");
     writeFileSync(schemaFile("shop", dir), "{ not json");
     expect(() => loadSchemas(dir)).toThrow(/shop: .*JSON/);

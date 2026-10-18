@@ -62,9 +62,11 @@ jobs:
       # read the app repos' main through the GitHub API, and both repos are
       # private, which the workflow's own token cannot read. APP_REPOS_READ_TOKEN
       # is a fine-grained PAT or GitHub App token with Contents: read on
-      # example-org/crm and example-org/shop. `pnpm schemas` reads
-      # GITHUB_TOKEN; `pnpm fetch:redacted-schemas` goes through `gh`, which
-      # reads GH_TOKEN first. Either exits non-zero when a file is missing.
+      # example-org/crm and example-org/shop. Both scripts read
+      # GITHUB_TOKEN, else GH_TOKEN. Each writes every app whose file fetches
+      # and validates and warns for the others (D37); it fails only when it
+      # wrote nothing. The Dockerfile then refuses an image in which no app has
+      # both files.
       - name: Fetch log field schemas and redacted schemas
         env:
           GITHUB_TOKEN: ${{ secrets.APP_REPOS_READ_TOKEN }}

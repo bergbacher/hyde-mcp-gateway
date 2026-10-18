@@ -2,15 +2,16 @@
 // never taken from the client, so the token scope and the service filter
 // cannot be bypassed. Every line Loki returns passes through hyde-json with
 // the app's schema before it leaves the server; Loki's stream labels, which
-// hold raw extracted values, are never read.
+// hold raw extracted values, are never read. An app without a log schema is
+// refused before Loki is asked (D37).
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { redactLine, type Json } from "hyde-json";
+import { redactLine, type Json, type LogSchema } from "hyde-json";
 import { z } from "zod";
 import { SERVICES, type App } from "../config.ts";
 import { LokiError, nsOf, type Loki, type LokiEntry } from "../loki.ts";
 import type { Schemas } from "../schemas.ts";
-import { appSchema, error, text } from "./server.ts";
+import { appSchema, error, notConfigured, text } from "./server.ts";
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
@@ -18,6 +19,7 @@ export const MAX_LIMIT = 500;
 export const ERROR_SCAN_LIMIT = 5000;
 
 export interface LogsOptions {
+  /** The log schemas present; an app left out is refused (D37). */
   schemas: Schemas;
   loki: Loki;
   /** app → LogQL stream selector */
@@ -59,6 +61,11 @@ const hours = z.number().positive("hours must be positive")
   .default(24)
   .describe(`How far back to read, in hours (default 24, at most ${MAX_HOURS})`);
 
+/** What `app` lacks for the log tools, as their error names it; empty when ready. */
+export function logsMissing(app: App, schemas: Schemas | undefined): string[] {
+  return schemas?.[app] ? [] : [`schemas/${app}.hyde-json.json is missing`];
+}
+
 export interface LogLine {
   timestamp: string;
   action: Json;
@@ -90,16 +97,20 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ app, hours: h, level, action, limit }) => guard(async () => {
-      const query = logQuery(app, streams[app], { level, action });
-      const { start, end } = window(h);
-      const [entries, matched] = await Promise.all([
-        loki.queryRange(query, { start, end, limit }),
-        loki.instant(countQuery(query, h), end),
-      ]);
-      const lines = entries.map((e) => toLine(e, schemas[app]));
-      return { matched: Math.max(matched, lines.length), returned: lines.length, lines };
-    }),
+    async ({ app, hours: h, level, action, limit }) => {
+      const schema = schemas[app];
+      if (!schema) return notConfigured(app, logsMissing(app, schemas));
+      return guard(async () => {
+        const query = logQuery(app, streams[app], { level, action });
+        const { start, end } = window(h);
+        const [entries, matched] = await Promise.all([
+          loki.queryRange(query, { start, end, limit }),
+          loki.instant(countQuery(query, h), end),
+        ]);
+        const lines = entries.map((e) => toLine(e, schema));
+        return { matched: Math.max(matched, lines.length), returned: lines.length, lines };
+      });
+    },
   );
 
   server.registerTool(
@@ -111,25 +122,29 @@ export function registerLogTools(server: McpServer, { schemas, loki, streams, no
       inputSchema: { app: appSchema, hours },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ app, hours: h }) => guard(async () => {
-      const entries = await loki.queryRange(logQuery(app, streams[app], { level: "error" }), {
-        ...window(h), limit: ERROR_SCAN_LIMIT,
+    async ({ app, hours: h }) => {
+      const schema = schemas[app];
+      if (!schema) return notConfigured(app, logsMissing(app, schemas));
+      return guard(async () => {
+        const entries = await loki.queryRange(logQuery(app, streams[app], { level: "error" }), {
+          ...window(h), limit: ERROR_SCAN_LIMIT,
       });
       const counts = new Map<string, number>();
       for (const entry of entries) {
-        const { action } = toLine(entry, schemas[app]);
+        const { action } = toLine(entry, schema);
         const key = typeof action === "string" ? action : "[none]";
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }
       const rows = [...counts].map(([action, count]) => ({ action, count }))
         .sort((a, b) => b.count - a.count || a.action.localeCompare(b.action));
       return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
-    }),
+      });
+    },
   );
 }
 
 /** One Loki entry, redacted. `action` and `level` are read from the redacted line, so the schema governs them too. */
-export function toLine(entry: LokiEntry, schema: Schemas[App]): LogLine {
+export function toLine(entry: LokiEntry, schema: LogSchema): LogLine {
   const timestamp = new Date(Number(BigInt(entry.ns) / 1_000_000n)).toISOString();
   const { format, line } = redactLine(entry.line, schema);
   if (format === "text" || line === null || typeof line !== "object" || Array.isArray(line)) {

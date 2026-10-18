@@ -14,7 +14,7 @@ const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const URL_BASE = "https://loki.test";
 const TOKEN = "read-only-logs-token";
 
-const schemas: Schemas = {
+const schemas = {
   crm: parseSchema({
     app: "crm",
     passIds: true,
@@ -39,7 +39,7 @@ const recorded: Respond = (url) =>
   url.pathname.endsWith("/query_range") ? new Response(RECORDED, { headers: { "content-type": "application/json" } }) : vector(42);
 
 /** An MCP client on a server whose Loki is a fake fetch; `requests` records every call. */
-async function connect(respond: Respond = recorded) {
+async function connect(respond: Respond = recorded, logSchemas: Schemas = schemas) {
   const requests: { url: URL; headers: Headers }[] = [];
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -47,7 +47,7 @@ async function connect(respond: Respond = recorded) {
     return respond(url);
   }) as typeof globalThis.fetch;
   const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch });
-  const server = createServer("claude-code", { logs: { schemas, loki, streams: DEFAULT_STREAMS, now: () => NOW } });
+  const server = createServer("claude-code", { logs: { schemas: logSchemas, loki, streams: DEFAULT_STREAMS, now: () => NOW } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
@@ -205,6 +205,19 @@ describe("Loki failures", () => {
     })) as typeof globalThis.fetch;
     const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch, timeoutMs: 10 });
     await expect(loki.instant("q", 0n)).rejects.toThrow(/^Loki did not answer within 0.01s$/);
+  });
+});
+
+describe("an app without a log schema (D37)", () => {
+  it("is refused by both log tools before Loki is asked; the other app still answers", async () => {
+    const { call, requests } = await connect(recorded, { crm: schemas.crm });
+    for (const tool of ["query_logs", "count_errors"]) {
+      const result = await call(tool, { app: "shop" });
+      expect(result.isError).toBe(true);
+      expect(result.text).toBe("shop is not configured: schemas/shop.hyde-json.json is missing");
+    }
+    expect(requests).toHaveLength(0);
+    expect((await call("count_errors", { app: "crm" })).isError).toBe(false);
   });
 });
 

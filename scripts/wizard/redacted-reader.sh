@@ -194,9 +194,15 @@ finish() {
 # password and unlock → verify as the reader → <APP>_REDACTED_URL into
 # apply.env (gitignored).
 #
-#   bash scripts/wizard/fetch-redacted-sql.sh
-#   bash scripts/wizard/redacted-reader.sh [--dry-run] \
-#     .redacted-sql/crm/redacted-views.sql .redacted-sql/shop/redacted-views.sql
+#   bash scripts/wizard/fetch-redacted-sql.sh [--app shop|crm]...
+#   bash scripts/wizard/redacted-reader.sh [--dry-run] [--app shop|crm]... \
+#     [.redacted-sql/crm/redacted-views.sql] [.redacted-sql/shop/redacted-views.sql]
+#
+# --app (repeatable) configures only that app (D37); without it, both. The
+# SQL paths are one per selected app, in the order crm, shop; omitted,
+# they default to .redacted-sql/<app>/redacted-views.sql. With one app
+# selected, two paths (crm's, shop's) are also accepted and the other
+# app's is ignored.
 #
 # Beside each redacted-views.sql must lie redacted-views-drop.sql and ca.pem,
 # the instance CA; fetch-redacted-sql.sh puts them there. --dry-run asks
@@ -210,8 +216,6 @@ finish() {
 # drop then apply, and an existing <APP>_REDACTED_URL keeps its password
 # unless you rotate. Runbook: docs/runbooks/redacted-reader.md.
 
-TOTAL_STAGES=11
-
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_FILE="${APPLY_ENV:-$ROOT/apply.env}"
 # VERIFY_CA checks the chain against the app's instance CA, not the host
@@ -223,14 +227,44 @@ VIEWS_DB=redacted
 DRY_RUN=0
 
 usage() {
-  printf 'usage: %s [--dry-run] <crm redacted-views.sql> <shop redacted-views.sql>\n' "$0" >&2
-  printf '       fetch both with scripts/wizard/fetch-redacted-sql.sh\n' >&2
+  printf 'usage: %s [--dry-run] [--app crm|shop]... [<crm redacted-views.sql>] [<shop redacted-views.sql>]\n' "$0" >&2
+  printf '       one path per selected app, default .redacted-sql/<app>/redacted-views.sql;\n' >&2
+  printf '       fetch them with scripts/wizard/fetch-redacted-sql.sh [--app <app>]\n' >&2
   exit 2
 }
-if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=1; shift; fi
-[[ $# -eq 2 ]] || usage
-CRM_SQL="$1"
-SHOP_SQL="$2"
+WANT_CRM=0 WANT_SHOP=0 PATHS=()
+while (($#)); do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --app)
+      case "${2:-}" in
+        crm) WANT_CRM=1 ;;
+        shop) WANT_SHOP=1 ;;
+        *) usage ;;
+      esac
+      shift 2 ;;
+    -*) usage ;;
+    *) PATHS+=("$1"); shift ;;
+  esac
+done
+if (( ! WANT_CRM && ! WANT_SHOP )); then WANT_CRM=1 WANT_SHOP=1; fi
+# The selected apps, always crm before shop.
+APPS=()
+if (( WANT_CRM )); then APPS+=(crm); fi
+if (( WANT_SHOP )); then APPS+=(shop); fi
+CRM_SQL="$ROOT/.redacted-sql/crm/redacted-views.sql"
+SHOP_SQL="$ROOT/.redacted-sql/shop/redacted-views.sql"
+case "${#PATHS[@]}" in
+  0) ;;
+  2) CRM_SQL="${PATHS[0]}" SHOP_SQL="${PATHS[1]}" ;;
+  1)
+    ((${#APPS[@]} == 1)) || usage
+    if [[ "${APPS[0]}" == crm ]]; then CRM_SQL="${PATHS[0]}"; else SHOP_SQL="${PATHS[0]}"; fi ;;
+  *) usage ;;
+esac
+
+# Preconditions, then five stages per app.
+TOTAL_STAGES=$((1 + 5 * ${#APPS[@]}))
 
 die() { printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
 
@@ -384,16 +418,21 @@ reader_url() { printf 'mysql://%s:%s@%s:%s/%s?ssl=true' "$READER" "$READER_PW" "
 # A dry run waits for nobody.
 if (( DRY_RUN )); then pause() { :; }; fi
 
-banner "redacted_reader on crm and shop"
+if ((${#APPS[@]} == 2)); then banner "redacted_reader on crm and shop"; else banner "redacted_reader on ${APPS[0]}"; fi
 if (( DRY_RUN )); then warn "dry run: nothing is asked, run or written"; fi
 
 stage "Preconditions"
 say "Runs on your machine. For each app you need an admin account on its RDB"
 say "instance that can create users, views and grants and read mysql.*."
-app_files crm "$CRM_SQL"
-app_files shop "$SHOP_SQL"
-say "${GREEN}✓${RESET} crm: $crm_VIEWS views, first \`$VIEWS_DB\`.\`$crm_VIEW\` from \`$crm_TABLE\`"
-say "${GREEN}✓${RESET} shop: $shop_VIEWS views, first \`$VIEWS_DB\`.\`$shop_VIEW\` from \`$shop_TABLE\`"
+if (( WANT_CRM )); then
+  app_files crm "$CRM_SQL"
+  say "${GREEN}✓${RESET} crm: $crm_VIEWS views, first \`$VIEWS_DB\`.\`$crm_VIEW\` from \`$crm_TABLE\`"
+fi
+if (( WANT_SHOP )); then
+  app_files shop "$SHOP_SQL"
+  say "${GREEN}✓${RESET} shop: $shop_VIEWS views, first \`$VIEWS_DB\`.\`$shop_VIEW\` from \`$shop_TABLE\`"
+fi
+if ((${#APPS[@]} == 1)); then note "Only ${APPS[0]} (--app); the other app is left as it is."; fi
 if ! command -v mysql >/dev/null 2>&1; then
   if (( DRY_RUN )); then warn "mysql client not found (fine for a dry run)"; else die "install the MySQL client: brew install mysql-client"; fi
 elif mysql --version 2>/dev/null | grep -qi mariadb; then
@@ -518,8 +557,7 @@ configure_app() {
   pause
 }
 
-configure_app crm
-configure_app shop
+for app in "${APPS[@]}"; do configure_app "$app"; done
 
 finish
 if (( DRY_RUN )); then note "dry run: nothing ran, nothing was written"; fi

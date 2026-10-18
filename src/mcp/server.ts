@@ -2,7 +2,9 @@
 // routing end to end and is always registered. The other tools are registered
 // when the server is given what they read: the log tools with `logs` (schemas
 // and a Loki client), `describe_schema` and `query_sql` with `sql` (the app's
-// redacted database (D2), whose privileges are the boundary).
+// redacted database (D2), whose privileges are the boundary). An app that
+// lacks what a tool reads is refused at that tool with "<app> is not
+// configured: <what is missing>" (D37); the other app is unaffected.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -17,7 +19,7 @@ export const appSchema = z.enum(APPS).describe('The app to read: "shop" or "crm"
 
 export interface SqlOptions {
   databases: Databases;
-  /** Each app's redacted-schema.md, loaded at startup; a missing app is left out. */
+  /** Each app's redacted-schema.md, loaded at startup; a missing app is left out and refused (D37). */
   schemas: Partial<Record<App, string>>;
 }
 
@@ -56,6 +58,19 @@ export function createServer(client: string, options: ServerOptions = {}): McpSe
   return server;
 }
 
+/** What `app` lacks for `describe_schema` and `query_sql`, as their error names it; empty when ready. */
+export function sqlMissing(app: App, sql: SqlOptions | undefined): string[] {
+  return [
+    ...(sql?.schemas[app] !== undefined ? [] : [`schemas/${app}.redacted-schema.md is missing`]),
+    ...(sql?.databases.has(app) ? [] : [`${app.toUpperCase()}_REDACTED_URL is not set`]),
+  ];
+}
+
+/** The tool error for an app that lacks what the tool reads (D37). */
+export function notConfigured(app: App, missing: string[]): CallToolResult {
+  return error(`${app} is not configured: ${missing.join("; ")}`);
+}
+
 function registerSqlTools(server: McpServer, sql: SqlOptions) {
   server.registerTool(
     "describe_schema",
@@ -66,9 +81,9 @@ function registerSqlTools(server: McpServer, sql: SqlOptions) {
       annotations: { readOnlyHint: true },
     },
     async ({ app }) => {
-      const schema = sql.schemas[app];
-      if (schema === undefined) return error(`No redacted schema loaded for ${app} (schemas/${app}.redacted-schema.md).`);
-      return text(schema);
+      const missing = sqlMissing(app, sql);
+      if (missing.length > 0) return notConfigured(app, missing);
+      return text(sql.schemas[app]!);
     },
   );
 
@@ -87,9 +102,10 @@ function registerSqlTools(server: McpServer, sql: SqlOptions) {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ app, sql: statement, limit }) => {
+      const missing = sqlMissing(app, sql);
+      if (missing.length > 0) return notConfigured(app, missing);
       const guarded = guardStatement(statement);
       if (!guarded.ok) return error(guarded.reason);
-      if (!sql.databases.has(app)) return error(`No database configured for ${app} (${app.toUpperCase()}_REDACTED_URL).`);
       try {
         const conn = await sql.databases.connect(app);
         const result = await runQuery(conn, guarded.sql, { limit: clampLimit(limit) });

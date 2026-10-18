@@ -18,13 +18,18 @@ RUN corepack enable
 # The tree includes schemas/, which is not committed: `pnpm schemas` (log field
 # schemas) and `pnpm fetch:redacted-schemas` (redacted-schema.md) fill it from
 # the app repos' main before the build (deploy.yml; README, First deploy). The
-# server reads it at startup. Without it every log field would be hidden and
-# describe_schema would fail, so the build stops here instead.
+# server reads it at startup and serves the apps whose files are present
+# (D37); an app without them is refused at its tools. An image that could
+# serve no app is useless, so the build stops unless at least one app has its
+# complete pair: schemas/<app>.hyde-json.json and schemas/<app>.redacted-schema.md.
 COPY . .
-RUN for f in schemas/crm.hyde-json.json schemas/shop.hyde-json.json \
-             schemas/crm.redacted-schema.md schemas/shop.redacted-schema.md; do \
-      test -s "$f" || { echo "$f is missing: run pnpm schemas and pnpm fetch:redacted-schemas before docker build" >&2; exit 1; }; \
-    done
+RUN ready=""; \
+    for app in shop crm; do \
+      if test -s "schemas/$app.hyde-json.json" && test -s "schemas/$app.redacted-schema.md"; then ready="$ready $app"; \
+      else echo "warning: $app is not configured: schemas/$app.hyde-json.json or schemas/$app.redacted-schema.md is missing" >&2; fi; \
+    done; \
+    test -n "$ready" || { echo "no app has both schema files: run pnpm schemas and pnpm fetch:redacted-schemas before docker build" >&2; exit 1; }; \
+    echo "apps with schemas:$ready"
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod
 

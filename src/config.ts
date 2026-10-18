@@ -1,9 +1,10 @@
 // Configuration from the environment. Client tokens are `HYDE_TOKEN_<CLIENT>`,
 // one per client (D16); the client name is the suffix, lower-cased. Each app's
 // redacted database is `<APP>_REDACTED_URL`, with `<APP>_DATABASE_CA` and
-// `<APP>_DATABASE_CERT_NAME` for TLS (src/db/connection.ts). Production needs
-// both apps' databases; elsewhere an app without a URL answers its database
-// tools with an error.
+// `<APP>_DATABASE_CERT_NAME` for TLS (src/db/connection.ts). Each app's URL is
+// optional: an app without one answers its database tools that it is not
+// configured (D37). In production an app with a URL needs `ssl=true`, its CA
+// and its certificate name.
 
 import { resolveDatabase, type DatabaseConfig } from "./db/connection.ts";
 
@@ -41,10 +42,7 @@ function readDatabases(env: NodeJS.ProcessEnv): Partial<Record<App, DatabaseConf
     const prefix = app.toUpperCase();
     const name = `${prefix}_REDACTED_URL`;
     const url = env[name];
-    if (!url) {
-      if (production) throw new Error(`${name} is not set`);
-      continue;
-    }
+    if (!url) continue;
     databases[app] = resolveDatabase({
       name,
       url,

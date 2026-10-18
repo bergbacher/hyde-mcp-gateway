@@ -43,12 +43,18 @@ describe("database connection", () => {
     expect(() => resolveDatabase({ ...base, url: "not a url secret-password" })).toThrow(/^CRM_REDACTED_URL: not a valid connection string$/);
   });
 
-  it("config reads each app's database and requires both in production", () => {
+  it("config reads each app's database; in production an app with a URL needs CA and cert name (D37)", () => {
     const token = { HYDE_TOKEN_X: "a".repeat(32) };
     expect(readConfig(token).databases).toEqual({});
     const c = readConfig({ ...token, SHOP_REDACTED_URL: "mysql://r:x@localhost/redacted" });
     expect(Object.keys(c.databases)).toEqual(["shop"]);
-    expect(() => readConfig({ ...token, NODE_ENV: "production" })).toThrow(/SHOP_REDACTED_URL is not set/);
+    expect(readConfig({ ...token, NODE_ENV: "production" }).databases).toEqual({});
+    const shopOnly = readConfig({ ...token, NODE_ENV: "production", SHOP_REDACTED_URL: TLS_URL, SHOP_DATABASE_CA: PEM, SHOP_DATABASE_CERT_NAME: "m" });
+    expect(Object.keys(shopOnly.databases)).toEqual(["shop"]);
+    expect(() => readConfig({ ...token, NODE_ENV: "production", SHOP_REDACTED_URL: TLS_URL })).toThrow(/SHOP_DATABASE_CA/);
+    expect(() =>
+      readConfig({ ...token, NODE_ENV: "production", SHOP_REDACTED_URL: TLS_URL, SHOP_DATABASE_CA: PEM }),
+    ).toThrow(/SHOP_DATABASE_CERT_NAME/);
     expect(() =>
       readConfig({ ...token, NODE_ENV: "production", SHOP_REDACTED_URL: TLS_URL, CRM_REDACTED_URL: TLS_URL, SHOP_DATABASE_CA: PEM, SHOP_DATABASE_CERT_NAME: "m" }),
     ).toThrow(/CRM_DATABASE_CA/);
