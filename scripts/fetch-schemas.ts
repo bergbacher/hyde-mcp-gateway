@@ -1,3 +1,7 @@
+// Developer convenience since D58: the server fetches these files itself at
+// runtime when APP_REPOS_READ_TOKEN is set (src/schema-store.ts); without the
+// token it reads what these scripts wrote to `schemas/`.
+//
 // Shared by `pnpm schemas` (scripts/fetch-log-schemas.ts) and
 // `pnpm fetch:redacted-schemas` (scripts/fetch-redacted-schemas.ts): downloads
 // one kind of per-app file from each registered app's repo (apps.json, D38)
@@ -15,13 +19,10 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { appNames, loadRegistry, type App, type AppEntry, type Registry } from "../src/registry.ts";
-import { parseAppSchema, redactedSchemaFile, SCHEMA_DIR, schemaFile } from "../src/schemas.ts";
+import { fetchSource, type Source } from "../src/github.ts";
+import { parseLogSchemaText, parseRedactedSchemaText, redactedSchemaFile, SCHEMA_DIR, schemaFile } from "../src/schemas.ts";
 
-export interface Source {
-  repo: string;
-  path: string;
-  ref: string;
-}
+export { fetchSource, type Source };
 
 export interface SchemaKind {
   /** The command, for messages: `pnpm schemas`. */
@@ -39,15 +40,7 @@ export const LOG_SCHEMAS: SchemaKind = {
   command: "pnpm schemas",
   source: (entry) => ({ repo: entry.repo, path: entry.logSchemaPath, ref: "main" }),
   target: schemaFile,
-  validate(app, text) {
-    let json: unknown;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      throw new Error("the file is not JSON");
-    }
-    parseAppSchema(app, json);
-  },
+  validate: parseLogSchemaText,
 };
 
 /** hyde-db's redacted schema: the entry's `redactedSchemaPath` → `schemas/<app>.redacted-schema.md`. */
@@ -55,9 +48,7 @@ export const REDACTED_SCHEMAS: SchemaKind = {
   command: "pnpm fetch:redacted-schemas",
   source: (entry) => ({ repo: entry.repo, path: entry.redactedSchemaPath, ref: "main" }),
   target: redactedSchemaFile,
-  validate(_app, text) {
-    if (text.trim() === "") throw new Error("the file is empty");
-  },
+  validate: (_app, text) => parseRedactedSchemaText(text),
 };
 
 export interface Args {
@@ -91,21 +82,6 @@ export function githubToken(env: NodeJS.ProcessEnv = process.env): string | unde
   } catch {
     return undefined;
   }
-}
-
-export async function fetchSource(source: Source, auth: string | undefined, fetchImpl: typeof fetch = fetch): Promise<string> {
-  const { repo, path, ref } = source;
-  const where = `${repo}@${ref}:${path}`;
-  const res = await fetchImpl(`https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`, {
-    headers: {
-      accept: "application/vnd.github.raw+json",
-      "x-github-api-version": "2022-11-28",
-      ...(auth ? { authorization: `Bearer ${auth}` } : {}),
-    },
-  });
-  if (res.status === 404) throw new Error(`${where} not found${auth ? "" : " (no GITHUB_TOKEN and no gh login; private repos answer 404)"}`);
-  if (!res.ok) throw new Error(`${where}: GitHub answered ${res.status} ${res.statusText}`);
-  return res.text();
 }
 
 export interface RunOptions extends Args {

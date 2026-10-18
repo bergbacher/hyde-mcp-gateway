@@ -49,9 +49,30 @@ describe("app source", () => {
   });
 
   it("is missing without the app's schema (D37)", () => {
-    expect(BUILT.reader("shop", "app")).toEqual({ missing: ["schemas/shop.hyde-json.json is missing"] });
-    expect(BUILT.missing("shop", "app")).toEqual(["schemas/shop.hyde-json.json is missing"]);
+    expect(BUILT.reader("shop", "app")).toEqual({ missing: ["log schema is missing"] });
+    expect(BUILT.missing("shop", "app")).toEqual(["log schema is missing"]);
     expect(BUILT.missing("crm", "app")).toEqual([]);
+  });
+
+  it("follows the live schema map: a schema a refresh loads or replaces applies at once (D58)", () => {
+    const schemas = new Map<string, ReturnType<typeof parseSchema>>();
+    const live = buildLogSources({ registry: REGISTRY, schemas, env: {} });
+    expect(live.missing("crm", "app")).toEqual(["log schema is missing"]);
+    schemas.set("crm", crmSchema);
+    const entry = { ns: String(BigInt(NOW) * 1_000_000n), line: JSON.stringify({ action: "a", level: "info", message: "m" }) };
+    const before = live.reader("crm", "app");
+    if ("missing" in before) throw new Error("crm should be configured");
+    expect(before.line(entry)).toMatchObject({ action: "a", payload: "m" });
+    expect(live.reader("crm", "app")).toBe(before);
+    schemas.set("crm", parseSchema({ app: "crm", fields: { action: "visible", level: "visible" } }));
+    const after = live.reader("crm", "app");
+    if ("missing" in after) throw new Error("crm should be configured");
+    expect(after.line(entry)).toMatchObject({ action: "a", payload: "[hidden]" });
+    expect(live.groups("crm")).toEqual({ logs: [] });
+  });
+
+  it("refuses level waf, which exists for source edge only", () => {
+    expect(readerOf("crm", "app").query({ level: "waf" })).toEqual({ refused: 'level "waf" exists for source edge only' });
   });
 
   it("reads the stream from apps.json unless HYDE_APP_<NAME>_LOKI_STREAM overrides it; refuses an invalid override", () => {
@@ -82,14 +103,19 @@ describe("edge source (D46)", () => {
     expect("query" in BUILT.reader("shop", "edge")).toBe(true);
   });
 
-  it("builds the LogQL: one json stage, error = origin 5xx or not passed by the WAF, action = method and path", () => {
+  it("builds the LogQL: one json stage, error = origin or client 5xx, waf = WAF block without 5xx, action = method and path", () => {
     const query = (filter: Parameters<LogReader["query"]>[0]) => readerOf("shop", "edge").query(filter);
     expect(query({})).toEqual({ logql: '{resource_name="shop-prod-es"} | json | __error__=""' });
     expect(query({ level: "error" })).toEqual({
-      logql: '{resource_name="shop-prod-es"} | json | waf_action != "pass" or http_response_code_origin >= 500 | __error__=""',
+      logql: '{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | __error__=""',
+    });
+    expect(query({ level: "waf" })).toEqual({
+      logql: '{resource_name="shop-prod-es"} | json | waf_action = "block"'
+        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
     });
     expect(query({ level: "info" })).toEqual({
-      logql: '{resource_name="shop-prod-es"} | json | waf_action = "pass" and http_response_code_origin < 500 | __error__=""',
+      logql: '{resource_name="shop-prod-es"} | json | waf_action != "block"'
+        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
     });
     expect(query({ action: "GET /api/sync/outbox.json" })).toEqual({
       logql: '{resource_name="shop-prod-es"} | json | http_request_method="GET"'
@@ -146,13 +172,19 @@ describe("edge source (D46)", () => {
     ["origin 502", { http_response_code_origin: 502, http_response_code_client: 502 }, "error", 502],
     ["origin 500 as a string", { http_response_code_origin: "500" }, "error", 500],
     ["origin 404", { http_response_code_origin: 404 }, "info", 404],
-    ["WAF block", { waf_action: "block", http_response_code_client: 403 }, "error", 200],
+    ["client 504 with origin 0", { http_response_code_origin: 0, http_response_code_client: 504 }, "error", 0],
+    ["client aborted (status 0)", { http_response_code_origin: 0, http_response_code_client: 0 }, "info", 0],
+    ["WAF block in log_only with origin 200", { waf_action: "block" }, "waf", 200],
+    ["WAF block with origin 502", { waf_action: "block", http_response_code_origin: 502 }, "error", 502],
+    ["waf_action -", { waf_action: "-" }, "info", 200],
+    ["waf_action missing", { waf_action: undefined }, "info", 200],
   ])("maps %s to level %s", (_, patch, level, status) => {
     const reader = readerOf("shop", "edge");
     expect(reader.line(edgeEntry(patch))).toMatchObject({ level, action: "GET /api/sync/outbox/pending" });
-    expect(reader.group(edgeEntry(patch))).toEqual({
-      key: `${status} GET /api/sync/outbox/pending`, row: { status, action: "GET /api/sync/outbox/pending" },
-    });
+    // count_errors counts errors only: a WAF hit or an aborted request is not grouped.
+    expect(reader.group(edgeEntry(patch))).toEqual(level === "error"
+      ? { key: `${status} GET /api/sync/outbox/pending`, row: { status, action: "GET /api/sync/outbox/pending" } }
+      : null);
   });
 
   it("derives from the redacted line what the raw-line derivation it replaces derived (D52)", () => {
@@ -167,9 +199,11 @@ describe("edge source (D46)", () => {
         const p = /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*)?([^?#]*)/.exec(url)![1]!;
         path = p === "" ? (url.includes("://") ? "/" : null) : p.startsWith("/") ? p : null;
       }
-      const origin = line.http_response_code_origin;
-      const status = typeof origin === "number" || (typeof origin === "string" && /^\d+$/.test(origin)) ? Number(origin) : null;
-      const level = line.waf_action !== "pass" || (status !== null && status >= 500) ? "error" : "info";
+      const statusOf = (value: unknown) =>
+        typeof value === "number" || (typeof value === "string" && /^\d+$/.test(value)) ? Number(value) : null;
+      const status = statusOf(line.http_response_code_origin);
+      const client = statusOf(line.http_response_code_client);
+      const level = (status ?? 0) >= 500 || (client ?? 0) >= 500 ? "error" : line.waf_action === "block" ? "waf" : "info";
       return { action: method && path ? `${method} ${scrubText(path)}` : null, level, status };
     }
     const reader = readerOf("shop", "edge");
@@ -184,21 +218,26 @@ describe("edge source (D46)", () => {
       "https://shop.example.invalid/de/DE89 3704 0044 0532 0130 00",
       "relative/path",
     ];
-    const patches = [{}, { http_response_code_origin: 502 }, { http_response_code_origin: "500" }, { waf_action: "block" }];
+    const patches = [
+      {}, { http_response_code_origin: 502 }, { http_response_code_origin: "500" }, { waf_action: "block" },
+      { http_response_code_origin: 0, http_response_code_client: 504 }, { waf_action: "-" },
+    ];
     for (const url of urls) {
       for (const patch of patches) {
         const entry = edgeEntry({ ...patch, http_client_request_url: url });
         const expected = fromRaw(entry.line);
         expect(reader.line(entry), url).toMatchObject({ action: expected.action, level: expected.level });
-        expect(reader.group(entry).row, url).toEqual({ status: expected.status, action: expected.action ?? "[none]" });
+        expect(reader.group(entry)?.row ?? null, url)
+          .toEqual(expected.level === "error" ? { status: expected.status, action: expected.action ?? "[none]" } : null);
       }
     }
   });
 
-  it("relies on the edge schema declaring method, origin status and WAF verdict visible and the URL text", () => {
+  it("relies on the edge schema declaring method, both statuses and WAF verdict visible and the URL text", () => {
     expect(EDGE_SCHEMA.fields).toMatchObject({
       http_request_method: "visible",
       http_response_code_origin: "visible",
+      http_response_code_client: "visible",
       waf_action: "visible",
       http_client_request_url: "text",
     });
@@ -215,13 +254,13 @@ describe("edge source (D46)", () => {
     expect(action("/api/a", "get it")).toBeNull();
     const notJson = { ns: String(BigInt(NOW) * 1_000_000n), line: "not json from jane.doe@example.com" };
     expect(readerOf("shop", "edge").line(notJson)).toMatchObject({ action: null, level: null, payload: "not json from [email]" });
-    expect(readerOf("shop", "edge").group(notJson)).toEqual({ key: "- [none]", row: { status: null, action: "[none]" } });
+    expect(readerOf("shop", "edge").group(notJson)).toBeNull();
   });
 });
 
 describe("startup view", () => {
   it("lists per app the sources apps.json declares, under their group, with what each lacks", () => {
-    expect(BUILT.groups("shop")).toEqual({ logs: ["schemas/shop.hyde-json.json is missing"], edge: [] });
+    expect(BUILT.groups("shop")).toEqual({ logs: ["log schema is missing"], edge: [] });
     expect(BUILT.groups("crm")).toEqual({ logs: [] });
   });
 });

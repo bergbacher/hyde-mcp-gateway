@@ -1,8 +1,7 @@
 # Deploy: build, push, apply, read back. One container, one environment, one
 # job.
 #
-# Order: fetch schemas/ from the app repos, verify the credential's target,
-# build and push the image tagged with the commit, `apply production
+# Order: verify the credential's target, build and push the image tagged with the commit, `apply production
 # --keep-secrets` (shape + image, no runtime variable, secret or plain: they
 # stay as live, set from apply.env by a local `pnpm infra:apply`), then
 # `diff production --strict` and an HTTPS smoke check. Any failure turns the
@@ -12,8 +11,8 @@
 # Unset, the job is skipped. Set it after the first local deploy (README,
 # Deploy): `--keep-secrets` refuses to create the container.
 #
-# Build only (D44): a manual run with `build_only` set fetches, verifies,
-# builds and pushes `<sha>` and `manual-<sha>` (never `latest`), skips apply,
+# Build only (D44): a manual run with `build_only` set verifies, builds
+# and pushes `<sha>` and `manual-<sha>` (never `latest`), skips apply,
 # diff and smoke check, and writes the local `pnpm infra:apply` command to the
 # job summary. It runs whatever `HYDE_DEPLOY_ENABLED` says: it is how the
 # first image reaches the registry without Docker on the operator's machine,
@@ -26,9 +25,10 @@
 # and infra/environments/production.yaml (README, Operator files), which hold
 # no secret but name your apps and Scaleway account, so they are kept out of
 # the repository and out of the logs. Organisation, project, region, registry
-# and image come from them and infra/. APP_REPOS_READ_TOKEN (build time only):
-# read access to the private app repos for the schema fetch, see that step.
-# No runtime value of the server is read here.
+# and image come from them and infra/. No runtime value of the server is read
+# here: the app schemas are not built in, the server fetches them at runtime
+# with its own container secret APP_REPOS_READ_TOKEN (D58), so a schema change
+# in an app repo needs no run of this workflow.
 
 name: Deploy
 
@@ -94,24 +94,6 @@ jobs:
             for (const v of new Set(values)) if (v.length >= 6) console.log(`::add-mask::${v}`);
           '
 
-      # schemas/ is not committed: the app repos own the files. Both scripts
-      # read the main of every repo apps.json registers through the GitHub
-      # API, and the repos are private, which the workflow's own token cannot
-      # read. APP_REPOS_READ_TOKEN is a fine-grained PAT or GitHub App token
-      # with Contents: read on each of them. Both scripts read
-      # GITHUB_TOKEN, else GH_TOKEN. Each writes every app whose file fetches
-      # and validates and warns for the others (D37); it fails only when it
-      # wrote nothing. The Dockerfile then refuses an image in which no app has
-      # both files.
-      - name: Fetch log field schemas and redacted schemas
-        env:
-          GITHUB_TOKEN: ${{ secrets.APP_REPOS_READ_TOKEN }}
-          GH_TOKEN: ${{ secrets.APP_REPOS_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          pnpm schemas
-          pnpm fetch:redacted-schemas
-
       - name: Read target from infra/
         id: target
         run: |
@@ -137,8 +119,8 @@ jobs:
           username: nologin
           password: ${{ secrets.SCW_SECRET_KEY }}
 
-      # `context: .` builds from the workspace, which holds the fetched
-      # schemas/; the action's default (the commit) would not. A build-only
+      # `context: .` builds from the workspace, which holds the apps.json
+      # written above; the action's default (the commit) would not. A build-only
       # run tags `manual-<sha>` instead of moving `latest`.
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -179,6 +161,10 @@ jobs:
           set -euo pipefail
           node scripts/infra/apply.ts apply production --keep-secrets > "$RUNNER_TEMP/apply.log"
           endpoint=$(sed -n 's/^endpoint=//p' "$RUNNER_TEMP/apply.log")
+          if [ -z "$endpoint" ]; then
+            echo "::error::apply printed no endpoint; the smoke check would run against an empty URL"
+            exit 1
+          fi
           echo "::add-mask::${endpoint#https://}"
           cat "$RUNNER_TEMP/apply.log"
           echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
