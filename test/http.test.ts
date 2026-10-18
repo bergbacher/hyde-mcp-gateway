@@ -149,7 +149,7 @@ describe("http with GitHub tokens (D59)", () => {
   };
   const databases: Databases = {
     has: () => true,
-    connect: (app) => { touched.push(`db:${app}`); return Promise.reject(new Error("reached the database")); },
+    query: (app) => { touched.push(`db:${app}`); return Promise.reject(new Error("reached the database")); },
     close: async () => {},
   };
   const app = createApp(config, {
