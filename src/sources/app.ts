@@ -3,7 +3,9 @@
 // `service`, `level`, `action` and the payload under `message`. The stream is
 // the registry's `loki.stream`, overridable by `HYDE_APP_<NAME>_LOKI_STREAM`;
 // lines are redacted by the app's own schema, which must declare `action` and
-// `level` visible since both are read from the redacted line.
+// `level` visible since both are read from the redacted line. The schema is
+// the schema store's (D58), looked up per call: the app is not configured
+// until a refresh loads its schema, and a changed schema applies at once.
 
 import { redactLine, type LogSchema } from "hyde-json";
 import type { LokiEntry } from "../loki.ts";
@@ -26,15 +28,24 @@ export const appSource: SourceKind<"app"> = {
     const override = env[key]?.trim();
     if (override && !STREAM_SELECTOR.test(override)) throw new Error(`${key} is not a LogQL stream selector ({label="value", …})`);
     const stream = override || entry.loki.stream;
-    const schema = schemas.get(entry.name);
-    if (!schema) return { stream, missing: [`schemas/${entry.name}.hyde-json.json is missing`] };
-    return { stream, reader: appReader(stream, entry.loki.service, schema) };
+    // The last schema seen and its reader: a new reader only after a refresh replaced the schema.
+    let last: { schema: LogSchema; reader: LogReader } | undefined;
+    return {
+      stream,
+      current() {
+        const schema = schemas.get(entry.name);
+        if (!schema) return { missing: ["log schema is missing"] };
+        if (last?.schema !== schema) last = { schema, reader: appReader(stream, entry.loki.service, schema) };
+        return { reader: last.reader };
+      },
+    };
   },
 };
 
 function appReader(stream: string, service: string, schema: LogSchema): LogReader {
   return {
     query(filter: LogFilter) {
+      if (filter.level === "waf") return { refused: 'level "waf" exists for source edge only' };
       if (filter.action !== undefined && !APP_ACTION.test(filter.action)) {
         return { refused: "action must be an action name (letters, digits, _ . : / -)" };
       }

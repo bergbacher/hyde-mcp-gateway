@@ -10,8 +10,9 @@ import type { LokiEntry } from "../loki.ts";
 import type { AppEntry } from "../registry.ts";
 import type { Schemas } from "../schemas.ts";
 
-/** The levels the tools filter by. */
-export type Level = "error" | "info";
+/** The levels the tools filter by; `waf` exists for the edge source only, the app source refuses it. */
+export const LEVELS = ["error", "info", "waf"] as const;
+export type Level = (typeof LEVELS)[number];
 
 /** What query_logs and count_errors narrow a source's lines by. */
 export interface LogFilter {
@@ -30,26 +31,35 @@ export interface LogLine {
 
 /** How one app's source is selected and read. Every line it returns has passed through hyde-json's redactLine (D52). */
 export interface LogReader {
-  /** The LogQL for `filter`, or the tool error for an action outside this source's grammar. */
+  /** The LogQL for `filter`, or the tool error for a level or an action outside this source's grammar. */
   query(filter: LogFilter): { logql: string } | { refused: string };
   line(entry: LokiEntry): LogLine;
-  /** count_errors' group of a line: its key and the row fields that make it up. */
-  group(entry: LokiEntry): { key: string; row: Record<string, Json> };
+  /** count_errors' group of a line: its key and the row fields that make it up; null for a line that is not an error. */
+  group(entry: LokiEntry): { key: string; row: Record<string, Json> } | null;
 }
 
 /** What a source is built from at startup. */
 export interface SourceInputs {
-  /** The app log schemas present (D37). */
+  /** The app log schemas loaded, live: the schema store's map (D58), read per call, so a refresh reaches the readers (D37). */
   schemas: Schemas;
   /** The committed edge schema (D46). */
   edgeSchema?: LogSchema;
   env: NodeJS.ProcessEnv;
 }
 
-/** One app's source, built once: the stream it reads (null when apps.json declares none) and its reader, or what it lacks. */
-export type BuiltSource =
-  | { stream: string | null; reader: LogReader; missing?: undefined }
-  | { stream: string | null; reader?: undefined; missing: string[] };
+/** A source's reader, or what it lacks. */
+export type Readiness = { reader: LogReader; missing?: undefined } | { reader?: undefined; missing: string[] };
+
+/**
+ * One app's source, built once: the stream it reads (null when apps.json
+ * declares none) and `current()`, its reader or what it lacks right now. What
+ * is fixed at startup (registry, environment, edge schema) is decided at
+ * build; what a schema refresh can change (D58) is asked per call.
+ */
+export interface BuiltSource {
+  stream: string | null;
+  current(): Readiness;
+}
 
 /** One kind of log source; `build` makes its reader for one app. */
 export interface SourceKind<Name extends string = string> {
@@ -58,7 +68,7 @@ export interface SourceKind<Name extends string = string> {
   /** The name the startup line lists an app under when this source answers. */
   group: string;
   /** For the tools' descriptions. */
-  describe: { source: string; queryLogs?: string; countErrors?: string; action: string };
+  describe: { source: string; queryLogs?: string; countErrors?: string; action: string; level?: string };
   /** Throws naming the environment variable when an override is invalid. */
   build(entry: AppEntry, inputs: SourceInputs): BuiltSource;
 }
