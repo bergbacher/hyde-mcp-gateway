@@ -11,7 +11,7 @@ infra/environments/*.yaml
 !infra/environments/*.example.yaml
 .redacted-sql/
 
-# Fetched from the app repos at build time; only the README and the edge schema are ours.
+# Fetched from the app repos by `pnpm schemas` for local runs without a token (D58); only the README and the edge schema are ours.
 schemas/*
 !schemas/README.md
 !schemas/edge.hyde-json.json

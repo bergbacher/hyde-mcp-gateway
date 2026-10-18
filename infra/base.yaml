@@ -73,6 +73,12 @@ variables:
   # scope (D20), sent as X-Token (src/config.ts readLokiConfig).
   - { name: COCKPIT_LOGS_URL, required: true, secret: false }
   - { name: COCKPIT_LOGS_READ_TOKEN, required: true, secret: true }
+  # The app schemas (D58, src/schema-store.ts): a fine-grained PAT or GitHub
+  # App token with Contents: read on every repo apps.json registers. The
+  # server fetches each app's log field schema and redacted schema with it at
+  # startup and every HYDE_SCHEMA_REFRESH_SECONDS (default 600); without it,
+  # every app is refused at its tools as not configured.
+  - { name: APP_REPOS_READ_TOKEN, required: true, secret: true }
   # One bearer token per client (D16, src/mcp/auth.ts), each with its app
   # scope (D39): HYDE_TOKEN_<CLIENT>_APPS, a comma list of apps.json names or
   # `*`. Not secret. The server refuses to start for a token without its scope

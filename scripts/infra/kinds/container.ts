@@ -21,7 +21,10 @@ export interface LiveContainer {
   name: string;
   status: string;
   namespace_id: string;
-  domain_name?: string;
+  /** Scaleway's default URL, with scheme: `https://<ns>-<name>.functions.fnc.<region>.scw.cloud`. */
+  public_endpoint?: string | null;
+  /** Null on current containers; kept as a fallback. */
+  domain_name?: string | null;
   image: string;
   min_scale: number;
   max_scale: number;
@@ -270,7 +273,14 @@ export function awaitSettled(ctx: KindContext, live: LiveContainer | null, optio
   }
 }
 
-/** The container's HTTPS endpoint on Scaleway's default domain. */
+/**
+ * The container's HTTPS endpoint on Scaleway's default domain. `get -o json`
+ * answers it in `public_endpoint` (with scheme); `domain_name` is null there,
+ * so it is only a fallback.
+ */
 export function endpoint(live: LiveContainer): string | undefined {
-  return live.domain_name ? `https://${live.domain_name}` : undefined;
+  const pub = live.public_endpoint?.trim().replace(/\/+$/, "");
+  if (pub) return /^https?:\/\//.test(pub) ? pub : `https://${pub}`;
+  const domain = live.domain_name?.trim();
+  return domain ? `https://${domain}` : undefined;
 }

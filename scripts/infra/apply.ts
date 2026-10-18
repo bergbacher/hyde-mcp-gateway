@@ -224,7 +224,10 @@ export function runCli(argv: string[], deps: CliDeps): number {
   log(`Applied infrastructure config for "${args.environment}"${args.keepSecrets ? " (secrets kept as live)" : ""}.`);
   if (!args.keepSecrets) log(`apps=${configuredApps(config, deps.env).join(",")}`);
   log(`containerId=${result.containerId}`);
-  if (result.endpoint) log(`endpoint=${result.endpoint}`);
+  // Always printed, empty when unknown: the deploy workflow reads this line and
+  // fails on an empty value instead of smoke-checking an empty URL.
+  log(`endpoint=${result.endpoint ?? ""}`);
+  if (!result.endpoint) errorLog("The container reports no public endpoint (public_endpoint, domain_name).");
   return 0;
 }
 

@@ -11,8 +11,11 @@
 // committed edge schema. They have no `action` and their `level` is always
 // info, so both are derived server side from the raw line: `action` is
 // `<method> <path>` (the URL path without query or fragment, scrubbed as free
-// text), and a line is an error when the origin answered 5xx or the WAF did
-// not pass it. An app without an `edge` entry is refused before Loki is asked.
+// text). A line is an `error` when the origin or the client side answered 5xx,
+// `waf` when the WAF marked it `block` (a would-block in log_only mode, a real
+// block otherwise), `info` otherwise. WAF hits are kept apart from errors: in
+// log_only mode the WAF marks thousands of requests the origin answered 200.
+// An app without an `edge` entry is refused before Loki is asked.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -31,6 +34,9 @@ export const ERROR_SCAN_LIMIT = 5000;
 
 export const SOURCES = ["app", "edge"] as const;
 export type Source = (typeof SOURCES)[number];
+/** `waf` exists for the edge source only. */
+export const LEVELS = ["error", "info", "waf"] as const;
+export type Level = (typeof LEVELS)[number];
 
 /** An app line's `action` filter. */
 export const APP_ACTION = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/;
@@ -38,7 +44,7 @@ export const APP_ACTION = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/;
 export const EDGE_ACTION = /^([A-Z]{3,7}) (\/[A-Za-z0-9_.~%:@+\/-]{0,200})$/;
 
 export interface LogsOptions {
-  /** The log schemas present; an app left out is refused (D37). */
+  /** The log schemas, read per call (the schema store's live map, D58); an app left out is refused (D37). */
   schemas: Schemas;
   /** The committed edge schema (D46); without it `source: "edge"` is refused as not configured. */
   edgeSchema?: LogSchema;
@@ -70,17 +76,19 @@ export function logQuery(source: LogSource, filter: LogFilter = {}): string {
 /**
  * `<edge stream> | json [| <level>] [| http_request_method="…" | http_client_request_url=~"…"] | __error__=""`.
  * Edge lines are plain JSON, so one `| json` extracts their fields. `level`
- * maps onto the access-log fields (D46): `error` is a WAF verdict other than
- * pass or an origin status of 500 and up, `info` the rest. `waf_action` comes
- * first so that `or` decides on it before converting the status to a number;
- * `__error__=""` drops a line whose status is not a number instead of failing
- * the count query. `action` is `<METHOD> <path>` (EDGE_ACTION) and matches the
+ * maps onto the access-log fields (D46), the three levels partition the lines:
+ * `error` is an origin or client status of 500 and up; `waf` is `waf_action`
+ * `block` without a 5xx; `info` the rest (a `-` or missing `waf_action`, a
+ * status 0 for an aborted request). `__error__=""` drops a line whose status
+ * is not a number instead of failing the count query. `action` is `<METHOD> <path>` (EDGE_ACTION) and matches the
  * URL with or without scheme and host, with any query or fragment.
  */
 export function edgeQuery(stream: string, filter: LogFilter = {}): string {
   const stages = [stream, "json"];
-  if (filter.level === "error") stages.push('waf_action != "pass" or http_response_code_origin >= 500');
-  if (filter.level === "info") stages.push('waf_action = "pass" and http_response_code_origin < 500');
+  const below500 = ["http_response_code_origin < 500", "http_response_code_client < 500"];
+  if (filter.level === "error") stages.push("http_response_code_origin >= 500 or http_response_code_client >= 500");
+  if (filter.level === "waf") stages.push('waf_action = "block"', ...below500);
+  if (filter.level === "info") stages.push('waf_action != "block"', ...below500);
   if (filter.action) {
     const match = EDGE_ACTION.exec(filter.action);
     if (!match) throw new Error(`not an edge action: ${filter.action}`);
@@ -117,7 +125,7 @@ const hours = z.number().positive("hours must be positive")
 /** What `app` lacks for the log tools, as their error names it; empty when ready. */
 export function logsMissing(app: App, logs: Pick<LogsOptions, "schemas" | "sources"> | undefined): string[] {
   return [
-    ...(logs?.schemas.has(app) ? [] : [`schemas/${app}.hyde-json.json is missing`]),
+    ...(logs?.schemas.has(app) ? [] : ["log schema is missing"]),
     ...(logs?.sources.has(app) ? [] : ["no Loki stream"]),
   ];
 }
@@ -138,8 +146,8 @@ export function noEdgeSource(app: App): string {
 interface Reader {
   query(filter: LogFilter): string;
   line(entry: LokiEntry): LogLine;
-  /** count_errors' group of a line: its key and the row fields that make it up. */
-  group(entry: LokiEntry): { key: string; row: Record<string, Json> };
+  /** count_errors' group of a line: its key and the row fields that make it up; null for a line that is not an error. */
+  group(entry: LokiEntry): { key: string; row: Record<string, Json> } | null;
 }
 
 export function registerLogTools(server: McpServer, gate: Gate, options: LogsOptions) {
@@ -161,7 +169,9 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
         query: (filter) => edgeQuery(stream, filter),
         line: (entry) => toEdgeLine(entry, edgeSchema),
         group: (entry) => {
-          const { action, status } = edgeFields(entry.line);
+          const { action, status, level } = edgeFields(entry.line);
+          // Loki selected errors already; a WAF hit or an aborted request never counts, whatever Loki returned.
+          if (level !== "error") return null;
           const row = { status, action: action ?? "[none]" };
           return { key: `${status ?? "-"} ${row.action}`, row };
         },
@@ -188,11 +198,13 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
         "Every line is redacted by the app's log field schema: undeclared and hidden fields read `[hidden]`, free text is scrubbed. " +
         "Returns how many lines matched and how many were returned. " +
         '`source: "edge"` reads the app\'s Edge Services access log instead: `action` is `<METHOD> <path>`, ' +
-        "`level` error means the origin answered 5xx or the WAF did not pass the request, and the client IP and query strings are redacted.",
+        "`level` error means the origin or client status is 5xx, `waf` that the WAF marked the request block (would-block in log_only mode), " +
+        "and the client IP and query strings are redacted.",
       inputSchema: {
         app: appSchema(gate.registry),
         hours,
-        level: z.enum(["error", "info"]).optional().describe('Only lines of this level: "error" or "info"'),
+        level: z.enum(LEVELS).optional()
+          .describe('Only lines of this level: "error" or "info"; for source edge also "waf" (requests the WAF marked block)'),
         action: z.string()
           .refine((v) => APP_ACTION.test(v) || EDGE_ACTION.test(v),
             "action must be an action name (letters, digits, _ . : / -), or <METHOD> <path> for source edge")
@@ -206,6 +218,7 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
     forApp(gate, async ({ app, hours: h, level, action, limit, source: src }) => {
       const reader = readerFor(app, src);
       if ("refused" in reader) return reader.refused;
+      if (level === "waf" && src !== "edge") return error('level "waf" exists for source edge only');
       if (action !== undefined && !(src === "edge" ? EDGE_ACTION : APP_ACTION).test(action)) {
         return error(src === "edge"
           ? 'action must be <METHOD> <path> for source edge, e.g. "GET /api/sync"'
@@ -230,7 +243,8 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
       description:
         "Counts the app's error lines of the last `hours` by action, most frequent first. " +
         `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there. ` +
-        '`source: "edge"` counts the Edge Services access log\'s errors (origin 5xx or not passed by the WAF) by origin status and `<METHOD> <path>`.',
+        '`source: "edge"` counts the Edge Services access log\'s errors (origin or client status 5xx; WAF hits are not errors, see query_logs level "waf") ' +
+        "by origin status and `<METHOD> <path>`.",
       inputSchema: { app: appSchema(gate.registry), hours, source },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -242,14 +256,18 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
           ...window(h), limit: ERROR_SCAN_LIMIT,
         });
         const groups = new Map<string, { row: Record<string, Json>; count: number }>();
+        let total = 0;
         for (const entry of entries) {
-          const { key, row } = reader.group(entry);
+          const grouped = reader.group(entry);
+          if (!grouped) continue;
+          total += 1;
+          const { key, row } = grouped;
           const group = groups.get(key) ?? groups.set(key, { row, count: 0 }).get(key)!;
           group.count += 1;
         }
         const rows = [...groups].sort(([ka, a], [kb, b]) => b.count - a.count || ka.localeCompare(kb))
           .map(([, { row, count }]) => ({ ...row, count }));
-        return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
+        return { rows, total, partial: entries.length >= ERROR_SCAN_LIMIT };
       });
     }),
   );
@@ -282,7 +300,7 @@ export function toEdgeLine(entry: LokiEntry, schema: LogSchema): LogLine {
  * it cannot pass around the schema; `level` by the error mapping of edgeQuery;
  * `status` the origin status. Each is null when the line does not carry it.
  */
-export function edgeFields(raw: string): { action: string | null; level: "error" | "info" | null; status: number | null } {
+export function edgeFields(raw: string): { action: string | null; level: Level | null; status: number | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -294,10 +312,14 @@ export function edgeFields(raw: string): { action: string | null; level: "error"
   const method = typeof line.http_request_method === "string" && /^[A-Z]{1,10}$/.test(line.http_request_method)
     ? line.http_request_method : null;
   const path = pathOf(line.http_client_request_url);
-  const origin = line.http_response_code_origin;
-  const status = typeof origin === "number" || (typeof origin === "string" && /^\d+$/.test(origin)) ? Number(origin) : null;
-  const level = line.waf_action !== "pass" || (status !== null && status >= 500) ? "error" : "info";
+  const status = statusOf(line.http_response_code_origin);
+  const client = statusOf(line.http_response_code_client);
+  const level = (status ?? 0) >= 500 || (client ?? 0) >= 500 ? "error" : line.waf_action === "block" ? "waf" : "info";
   return { action: method && path ? `${method} ${scrubText(path)}` : null, level, status };
+}
+
+function statusOf(value: unknown): number | null {
+  return typeof value === "number" || (typeof value === "string" && /^\d+$/.test(value)) ? Number(value) : null;
 }
 
 /** The path of a URL, with or without scheme and host, without query or fragment; null when it has none. */

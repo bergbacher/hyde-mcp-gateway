@@ -1,19 +1,17 @@
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { edgeSchemaFile, loadEdgeSchema, loadSchemas, schemaFile } from "../src/schemas.ts";
-import { REGISTRY } from "./helpers.ts";
+import { edgeSchemaFile, loadEdgeSchema, parseLogSchemaText, parseRedactedSchemaText, schemaFile } from "../src/schemas.ts";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/schemas/", import.meta.url));
 const dirs: string[] = [];
 
-/** A temp dir holding the fixture schemas of `apps`. */
-function dirWith(...apps: ("crm" | "shop")[]): string {
+/** An empty temp dir. */
+function emptyDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "hyde-schemas-"));
   dirs.push(dir);
-  for (const app of apps) copyFileSync(schemaFile(app, FIXTURES), schemaFile(app, dir));
   return dir;
 }
 
@@ -21,41 +19,32 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("loadSchemas", () => {
-  it("loads and validates both apps' schemas", () => {
-    const schemas = loadSchemas(REGISTRY, FIXTURES);
-    expect(schemas.get("crm")?.app).toBe("crm");
-    expect(schemas.get("crm")?.fields["message.workspaceId"]).toBe("visible");
-    expect(schemas.get("shop")?.fields["message.to"]).toBe("hidden");
-    expect(schemas.get("shop")?.passIds).toBe(true);
+const fixture = (app: "crm" | "shop") => readFileSync(schemaFile(app, FIXTURES), "utf8");
+
+describe("parseLogSchemaText", () => {
+  it("validates an app's log schema", () => {
+    const crm = parseLogSchemaText("crm", fixture("crm"));
+    expect(crm.app).toBe("crm");
+    expect(crm.fields["message.workspaceId"]).toBe("visible");
+    const shop = parseLogSchemaText("shop", fixture("shop"));
+    expect(shop.fields["message.to"]).toBe("hidden");
+    expect(shop.passIds).toBe(true);
   });
 
-  it("returns the apps whose file exists and leaves the others out (D37)", () => {
-    const schemas = loadSchemas(REGISTRY, dirWith("shop"));
-    expect([...schemas.keys()]).toEqual(["shop"]);
-    expect(schemas.get("shop")?.app).toBe("shop");
-    expect(schemas.get("crm")).toBeUndefined();
-  });
-
-  it("throws naming both when neither exists", () => {
-    const dir = dirWith();
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/No log schema/);
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*shop\.hyde-json\.json is missing\n.*crm: .* is missing/);
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/pnpm schemas/);
-  });
-
-  it("throws on a present file that is not JSON or not a valid schema, even when the other app is fine", () => {
-    const dir = dirWith("crm", "shop");
-    writeFileSync(schemaFile("shop", dir), "{ not json");
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*JSON/);
-    writeFileSync(schemaFile("shop", dir), JSON.stringify({ app: "shop", fields: { "message.x": "shown" } }));
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*"shown" is not one of/);
+  it("throws on text that is not JSON or not a valid schema", () => {
+    expect(() => parseLogSchemaText("shop", "{ not json")).toThrow(/not JSON/);
+    expect(() => parseLogSchemaText("shop", JSON.stringify({ app: "shop", fields: { "message.x": "shown" } }))).toThrow(/"shown" is not one of/);
   });
 
   it("throws when a schema is filed under the wrong app", () => {
-    const dir = dirWith("crm");
-    copyFileSync(schemaFile("crm", FIXTURES), schemaFile("shop", dir));
-    expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*"app" is "crm", expected "shop"/);
+    expect(() => parseLogSchemaText("shop", fixture("crm"))).toThrow(/"app" is "crm", expected "shop"/);
+  });
+});
+
+describe("parseRedactedSchemaText", () => {
+  it("takes any non-empty text, refuses an empty file", () => {
+    expect(parseRedactedSchemaText("# shop\n")).toBe("# shop\n");
+    expect(() => parseRedactedSchemaText(" \n")).toThrow(/empty/);
   });
 });
 
@@ -74,7 +63,7 @@ describe("loadEdgeSchema (D46)", () => {
   });
 
   it("throws naming the file when it is missing or filed under another name", () => {
-    const dir = dirWith();
+    const dir = emptyDir();
     expect(() => loadEdgeSchema(dir)).toThrow(/edge\.hyde-json\.json not loaded/);
     writeFileSync(edgeSchemaFile(dir), JSON.stringify({ app: "shop", fields: {} }));
     expect(() => loadEdgeSchema(dir)).toThrow(/"app" is "shop", expected "edge"/);

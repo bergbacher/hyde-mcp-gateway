@@ -51,7 +51,8 @@ export const LIVE: LiveContainer = {
   name: "hyde-mcp-gateway",
   status: "ready",
   namespace_id: "00000000-0000-4000-8000-00000000000a",
-  domain_name: "hyde-mcp-gateway.example.invalid",
+  domain_name: null,
+  public_endpoint: "https://examplens-hyde-mcp-gateway.functions.fnc.example.invalid",
   image: "rg.fr-par.scw.cloud/test-registry/hyde-mcp-gateway:abcdef",
   min_scale: 0,
   max_scale: 2,
@@ -68,6 +69,15 @@ export const LIVE: LiveContainer = {
   environment_variables: {},
   secret_environment_variables: { HYDE_TOKEN_AGENT: "$argon2id$digest", COCKPIT_LOGS_READ_TOKEN: "$argon2id$digest" },
 };
+
+/**
+ * A `scw container container get -o json` answer as Scaleway shapes it:
+ * `domain_name` null, the URL in `public_endpoint`. Placeholder ids, example
+ * hosts (the repository is public).
+ */
+export const RECORDED_CONTAINER_GET: LiveContainer = JSON.parse(
+  fs.readFileSync(path.resolve(import.meta.dirname, "..", "fixtures", "scw", "container-get.json"), "utf8"),
+);
 
 /** `list` answers `list`, `get` answers `get`; every write answers `{}` and is recorded. */
 export function makeExec(list: unknown[], get: unknown = LIVE) {

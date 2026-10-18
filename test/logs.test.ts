@@ -230,7 +230,7 @@ describe("an app without a log schema (D37)", () => {
     for (const tool of ["query_logs", "count_errors"]) {
       const result = await call(tool, { app: "shop" });
       expect(result.isError).toBe(true);
-      expect(result.text).toBe("shop is not configured: schemas/shop.hyde-json.json is missing");
+      expect(result.text).toBe("shop is not configured: log schema is missing");
     }
     expect(requests).toHaveLength(0);
     expect((await call("count_errors", { app: "crm" })).isError).toBe(false);
@@ -319,13 +319,18 @@ describe("edge source (D46)", () => {
     });
   });
 
-  it("builds the LogQL: one json stage, error = origin 5xx or not passed by the WAF, action = method and path", () => {
+  it("builds the LogQL: one json stage, error = origin or client 5xx, waf = WAF block without 5xx, action = method and path", () => {
     expect(edgeQuery(SHOP_EDGE)).toBe('{resource_name="shop-prod-es"} | json | __error__=""');
     expect(edgeQuery(SHOP_EDGE, { level: "error" })).toBe(
-      '{resource_name="shop-prod-es"} | json | waf_action != "pass" or http_response_code_origin >= 500 | __error__=""',
+      '{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | __error__=""',
+    );
+    expect(edgeQuery(SHOP_EDGE, { level: "waf" })).toBe(
+      '{resource_name="shop-prod-es"} | json | waf_action = "block"'
+        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
     );
     expect(edgeQuery(SHOP_EDGE, { level: "info" })).toBe(
-      '{resource_name="shop-prod-es"} | json | waf_action = "pass" and http_response_code_origin < 500 | __error__=""',
+      '{resource_name="shop-prod-es"} | json | waf_action != "block"'
+        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
     );
     expect(edgeQuery(SHOP_EDGE, { action: "GET /api/sync/outbox.json" })).toBe(
       '{resource_name="shop-prod-es"} | json | http_request_method="GET"'
@@ -338,7 +343,12 @@ describe("edge source (D46)", () => {
     ["origin 502", { http_response_code_origin: 502, http_response_code_client: 502 }, "error", 502],
     ["origin 500 as a string", { http_response_code_origin: "500" }, "error", 500],
     ["origin 404", { http_response_code_origin: 404 }, "info", 404],
-    ["WAF block", { waf_action: "block", http_response_code_client: 403 }, "error", 200],
+    ["client 504 with origin 0", { http_response_code_origin: 0, http_response_code_client: 504 }, "error", 0],
+    ["client aborted (status 0)", { http_response_code_origin: 0, http_response_code_client: 0 }, "info", 0],
+    ["WAF block in log_only with origin 200", { waf_action: "block" }, "waf", 200],
+    ["WAF block with origin 502", { waf_action: "block", http_response_code_origin: 502 }, "error", 502],
+    ["waf_action -", { waf_action: "-" }, "info", 200],
+    ["waf_action missing", { waf_action: undefined }, "info", 200],
   ])("maps %s to level %s", (_, patch, level, status) => {
     expect(edgeFields(edgeLine(patch))).toMatchObject({ level, status, action: "GET /api/sync/outbox/pending" });
   });
@@ -383,29 +393,43 @@ describe("edge source (D46)", () => {
     expect(range.url.searchParams.get("query")).toBe(edgeQuery(SHOP_EDGE, { level: "error", action: "GET /api/sync" }));
   });
 
+  it("query_logs level waf returns the WAF hits, labelled waf", async () => {
+    const { call, requests } = await connect(streams([edgeLine({ waf_action: "block" })]));
+    const body = (await call("query_logs", { app: "shop", source: "edge", level: "waf" })).json();
+    expect(body.lines[0]).toMatchObject({ level: "waf", payload: { waf_action: "block", waf_mode: "log_only" } });
+    const range = requests.find((r) => r.url.pathname.endsWith("/query_range"))!;
+    expect(range.url.searchParams.get("query")).toBe(edgeQuery(SHOP_EDGE, { level: "waf" }));
+  });
+
   it("refuses an action of the other source's form before asking Loki", async () => {
     const { call, requests } = await connect(streams([]));
     const edge = await call("query_logs", { app: "shop", source: "edge", action: "send-mail" });
     expect(edge).toMatchObject({ isError: true, text: 'action must be <METHOD> <path> for source edge, e.g. "GET /api/sync"' });
+    expect(await call("query_logs", { app: "shop", level: "waf" }))
+      .toMatchObject({ isError: true, text: 'level "waf" exists for source edge only' });
     const app = await call("query_logs", { app: "shop", action: "GET /api/sync" });
     expect(app).toMatchObject({ isError: true, text: "action must be an action name (letters, digits, _ . : / -)" });
     expect((await call("query_logs", { app: "shop", source: "cdn" })).isError).toBe(true);
     expect(requests).toHaveLength(0);
   });
 
-  it("count_errors groups edge errors by origin status and method and path, without the query", async () => {
+  it("count_errors groups edge errors by origin status and method and path, without the query; WAF hits and aborts are no errors", async () => {
     const { call, requests } = await connect(streams([
       edgeLine({ http_response_code_origin: 502, http_client_request_url: "https://shop.example.invalid/api/sync?token=a" }),
       edgeLine({ http_response_code_origin: 502, http_client_request_url: "https://shop.example.invalid/api/sync?token=b" }),
       edgeLine({ http_response_code_origin: 503, http_request_method: "POST", http_client_request_url: "https://shop.example.invalid/api/sync" }),
-      edgeLine({ waf_action: "block", http_response_code_client: 403 }),
+      edgeLine({ http_response_code_origin: 0, http_response_code_client: 504 }),
+      // Not errors, should Loki return them anyway: a log_only WAF hit, a `-` verdict, a client abort.
+      edgeLine({ waf_action: "block" }),
+      edgeLine({ waf_action: "-" }),
+      edgeLine({ http_response_code_origin: 0, http_response_code_client: 0 }),
     ]));
     const result = await call("count_errors", { app: "shop", hours: 168, source: "edge" });
     expect(result.isError).toBe(false);
     expect(result.json()).toEqual({
       rows: [
         { status: 502, action: "GET /api/sync", count: 2 },
-        { status: 200, action: "GET /api/sync/outbox/pending", count: 1 },
+        { status: 0, action: "GET /api/sync/outbox/pending", count: 1 },
         { status: 503, action: "POST /api/sync", count: 1 },
       ],
       total: 4,
