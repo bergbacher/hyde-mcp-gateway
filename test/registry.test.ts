@@ -5,10 +5,9 @@ import { describe, expect, it } from "vitest";
 import { parseSchema } from "hyde-json";
 import { query } from "../scripts/registry.ts";
 import { readConfig, readLokiConfig } from "../src/config.ts";
-import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
 import { appNames, appVariables, envPrefix, EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry } from "../src/registry.ts";
-import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP } from "./helpers.ts";
+import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP, untouchable } from "./helpers.ts";
 
 const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 const TOKEN = { HYDE_TOKEN_X: "a".repeat(32), HYDE_TOKEN_X_APPS: "*" };
@@ -119,7 +118,6 @@ describe("env prefix", () => {
 });
 
 describe("tools against the registry", () => {
-  const untouchable: Databases = { has: () => true, connect: () => Promise.reject(new Error("reached the database")), close: async () => {} };
   const silentLoki = () => {
     const requests: string[] = [];
     const loki = createLoki({

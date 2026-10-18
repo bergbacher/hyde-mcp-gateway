@@ -165,7 +165,7 @@ pnpm test
 
 ### Integration test
 
-`test/query.integration.test.ts` runs `query_sql` against a local MySQL and is skipped unless `HYDE_TEST_MYSQL_URL` is set. With Homebrew `mysql@8.4`:
+`test/query.integration.test.ts` runs `query_sql` and the database module's `query` ([`src/db/pool.ts`](src/db/pool.ts)) against a local MySQL and is skipped unless `HYDE_TEST_MYSQL_URL` is set. With Homebrew `mysql@8.4`:
 
 ```sh
 brew install mysql@8.4 && brew services start mysql@8.4

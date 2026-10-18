@@ -16,8 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { guardStatement } from "../db/guard.ts";
-import type { Databases } from "../db/pool.ts";
-import { clampLimit, DEFAULT_LIMIT, MAX_LIMIT, runQuery } from "../engine/query.ts";
+import { DEFAULT_LIMIT, MAX_LIMIT, type Databases } from "../db/pool.ts";
 import { appNames, appVariables, unknownApp, type App, type Registry } from "../registry.ts";
 import { allowed, scopeOf, unauthorized, type Principal } from "./auth.ts";
 import { registerLogTools, type LogsOptions } from "./logs.ts";
@@ -146,9 +145,7 @@ function registerSqlTools(server: McpServer, gate: Gate, sql: SqlOptions) {
       const guarded = guardStatement(statement);
       if (!guarded.ok) return error(guarded.reason);
       try {
-        const conn = await sql.databases.connect(app);
-        const result = await runQuery(conn, guarded.sql, { limit: clampLimit(limit) });
-        return text(JSON.stringify(result));
+        return text(JSON.stringify(await sql.databases.query(app, guarded.sql, limit)));
       } catch (e) {
         return error(e instanceof Error ? e.message : String(e));
       }

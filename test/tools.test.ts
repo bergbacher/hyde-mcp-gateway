@@ -8,14 +8,7 @@ import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
 import { toolNames, type ServerOptions } from "../src/mcp/server.ts";
 import { loadRedactedSchemas, loadSchemas } from "../src/schemas.ts";
-import { connectInMemory, REGISTRY, textOf } from "./helpers.ts";
-
-/** A database that fails the test if anything reaches it. */
-const untouchable: Databases = {
-  has: () => true,
-  connect: () => Promise.reject(new Error("reached the database")),
-  close: async () => {},
-};
+import { answering, connectInMemory, REGISTRY, textOf, untouchable } from "./helpers.ts";
 
 describe("describe_schema", () => {
   it("returns the app's redacted schema loaded from schemas/", async () => {
@@ -62,51 +55,61 @@ describe("query_sql", () => {
     await none.close();
     await client.close();
   });
+
+  it("returns a database error verbatim as a tool error", async () => {
+    const mysqlError = "Unknown column 'email' in 'field list'";
+    const databases = answering(() => Promise.reject(Object.assign(new Error(mysqlError), { code: "ER_BAD_FIELD_ERROR" })));
+    const client = await connectInMemory({ sql: { databases, schemas: new Map([["crm", "# crm\n"]]) } });
+    const result = await client.callTool({ name: "query_sql", arguments: { app: "crm", sql: "SELECT email FROM users" } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toBe(mysqlError);
+    await client.close();
+  });
+
 });
 
 describe("app scope at the SQL tools (D39)", () => {
-  /** A database that counts every connection attempt. */
+  /** A database that records every query and answers each with one row. */
   function counting() {
-    const connects: string[] = [];
-    const databases: Databases = {
-      has: () => true,
-      connect: (app) => {
-        connects.push(app);
-        return Promise.reject(new Error("reached the database"));
-      },
-      close: async () => {},
-    };
-    return { databases, connects };
+    const queries: { app: string; sql: string; limit: number | undefined }[] = [];
+    const databases = answering(async (app, sql, limit) => {
+      queries.push({ app, sql, limit });
+      return { columns: ["1"], rows: [[1]], truncated: false };
+    });
+    return { databases, queries };
   }
   const schemas = new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]);
   const shopOnly = { client: "agent", apps: new Set(["shop"]) };
 
   it("refuses an app outside the scope at describe_schema and query_sql without touching the database", async () => {
-    const { databases, connects } = counting();
+    const { databases, queries } = counting();
     const client = await connectInMemory({ sql: { databases, schemas }, principal: shopOnly });
     for (const name of ["describe_schema", "query_sql"]) {
       const result = await client.callTool({ name, arguments: { app: "crm", sql: "SELECT 1" } });
       expect(result.isError).toBe(true);
       expect(textOf(result)).toBe("client agent is not authorized for app crm");
     }
-    expect(connects).toEqual([]);
+    expect(queries).toEqual([]);
     await client.close();
   });
 
   it("allows an app in scope", async () => {
-    const { databases, connects } = counting();
+    const { databases, queries } = counting();
     const client = await connectInMemory({ sql: { databases, schemas }, principal: shopOnly });
     expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop\n");
-    await client.callTool({ name: "query_sql", arguments: { app: "shop", sql: "SELECT 1" } });
-    expect(connects).toEqual(["shop"]);
+    const result = await client.callTool({ name: "query_sql", arguments: { app: "shop", sql: "SELECT 1;" } });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result))).toEqual({ columns: ["1"], rows: [[1]], truncated: false });
+    // The guarded statement, trailing semicolon cut.
+    expect(queries).toEqual([{ app: "shop", sql: "SELECT 1", limit: undefined }]);
     await client.close();
   });
 
   it("allows every registered app with *", async () => {
-    const { databases, connects } = counting();
+    const { databases, queries } = counting();
     const client = await connectInMemory({ sql: { databases, schemas }, principal: { client: "agent", apps: "*" } });
     for (const app of REGISTRY.apps.keys()) await client.callTool({ name: "query_sql", arguments: { app, sql: "SELECT 1" } });
-    expect(connects).toEqual([...REGISTRY.apps.keys()]);
+    expect(queries.map((q) => q.app)).toEqual([...REGISTRY.apps.keys()]);
     await client.close();
   });
 
