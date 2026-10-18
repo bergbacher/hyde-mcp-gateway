@@ -1,0 +1,141 @@
+# Deploy: build, push, apply, read back. Adapted from crm's deploy.yml,
+# without its migrate job, Slack report or environment resolution: one
+# container, one environment, one job.
+#
+# Order: fetch schemas/ from the app repos, verify the credential's target,
+# build and push the image tagged with the commit, `apply production
+# --keep-secrets` (shape + image, no runtime variable, secret or plain: they
+# stay as live, set from apply.env by a local `pnpm infra:apply`), then
+# `diff production --strict` and an HTTPS smoke check. Any failure turns the
+# run red.
+#
+# The switch: repository variable `HYDE_DEPLOY_ENABLED` must be exactly `true`.
+# Unset, the job is skipped. Set it after the first local deploy (README,
+# Deploy): `--keep-secrets` refuses to create the container.
+#
+# Secrets read: SCW_ACCESS_KEY, SCW_SECRET_KEY, as repository secrets. They
+# override the organisation-level pair of the same name, which
+# belongs to another Scaleway organisation; scripts/infra/organisation.ts
+# refuses that pair. Organisation, project, region, registry and image come
+# from infra/, never from a secret. APP_REPOS_READ_TOKEN (build time only):
+# read access to the private app repos for the schema fetch, see that step.
+# No runtime value of the server is read here.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One container: never two rollouts at once, never cancel a running one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build, push, apply, verify
+    if: vars.HYDE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SCW_ACCESS_KEY: ${{ secrets.SCW_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCW_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # schemas/ is not committed: the app repos own the files. Both scripts
+      # read the app repos' main through the GitHub API, and both repos are
+      # private, which the workflow's own token cannot read. APP_REPOS_READ_TOKEN
+      # is a fine-grained PAT or GitHub App token with Contents: read on
+      # example-org/crm and example-org/shop. `pnpm schemas` reads
+      # GITHUB_TOKEN; `pnpm fetch:redacted-schemas` goes through `gh`, which
+      # reads GH_TOKEN first. Either exits non-zero when a file is missing.
+      - name: Fetch log field schemas and redacted schemas
+        env:
+          GITHUB_TOKEN: ${{ secrets.APP_REPOS_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.APP_REPOS_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          pnpm schemas
+          pnpm fetch:redacted-schemas
+
+      - name: Read target from infra/
+        id: target
+        run: |
+          set -euo pipefail
+          node scripts/infra/apply.ts target production | tee -a "$GITHUB_OUTPUT"
+          node scripts/infra/apply.ts target production | sed -n \
+            -e 's/^organization-id=/SCW_DEFAULT_ORGANIZATION_ID=/p' \
+            -e 's/^project-id=/SCW_DEFAULT_PROJECT_ID=/p' \
+            -e 's/^region=/SCW_DEFAULT_REGION=/p' >> "$GITHUB_ENV"
+
+      - uses: scaleway/action-scw@v0
+
+      # Before anything is pushed: a key from another organisation
+      # authenticates fine.
+      - name: Verify the credential reaches the committed target
+        run: node scripts/infra/apply.ts verify-organisation production
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.target.outputs.registry-host }}
+          username: nologin
+          password: ${{ secrets.SCW_SECRET_KEY }}
+
+      # `context: .` builds from the workspace, which holds the fetched
+      # schemas/; the action's default (the commit) would not.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.target.outputs.image }}:${{ github.sha }}
+            ${{ steps.target.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Apply (secrets kept as live)
+        id: apply
+        env:
+          HYDE_IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node scripts/infra/apply.ts apply production --keep-secrets | tee "$RUNNER_TEMP/apply.log"
+          grep '^endpoint=' "$RUNNER_TEMP/apply.log" >> "$GITHUB_OUTPUT"
+
+      - name: Read the container back
+        run: node scripts/infra/apply.ts diff production --strict
+
+      # Min scale 0: the first request may wake an instance, hence the retries.
+      - name: Smoke check over HTTPS
+        env:
+          ENDPOINT: ${{ steps.apply.outputs.endpoint }}
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --retry 5 --retry-all-errors --max-time 20 "$ENDPOINT/health"
+          echo
+          status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 -X POST "$ENDPOINT/mcp")
+          if [ "$status" != "401" ]; then
+            echo "::error::/mcp without a token answered $status, expected 401"
+            exit 1
+          fi
+          echo "/mcp without a token: 401"

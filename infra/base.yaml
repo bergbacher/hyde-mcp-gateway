@@ -1,0 +1,111 @@
+# hyde-mcp-gateway's Scaleway Serverless Container (D15), in the apps' Scaleway organisation next to
+# shop and crm.
+#
+# Read by scripts/infra/config.ts and reconciled by scripts/infra/apply.ts
+# (`diff` / `apply` / `verify-organisation`). Copied from crm's
+# infra/base.yaml and trimmed to the one kind this server needs: no jobs, cron
+# triggers, Cockpit retention or alert rules.
+#
+# Field names under `container` mirror the `scw` CLI's dashed arg names 1:1, so
+# this file can be checked against `scw container container create --help`.
+#
+# Per-environment values (container.name, container.min-scale) live in
+# infra/environments/<env>.yaml and are deep-merged on top of this file.
+
+region: fr-par
+
+# the apps' Scaleway organisation. Every subcommand compares it against the
+# `organization_id` of `container.namespace-id`, read live, and refuses on a
+# mismatch: `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` also exist as organisation-level
+# secrets for a different Scaleway organisation, and such a key
+# authenticates fine (scripts/infra/organisation.ts). Value from crm's
+# infra/base.yaml.
+organizationId: 00000000-0000-0000-0000-000000000000
+
+# The apps' project: `default`, whose id equals the organisation's (crm
+# cutover notes, read live there). Checked against the
+# namespace's `project_id` with the organisation; the workflow derives
+# SCW_DEFAULT_PROJECT_ID from it, so it is never a secret.
+projectId: 00000000-0000-0000-0000-000000000000
+
+# the apps' Scaleway organisation's registry namespace, shared with shop and crm.
+registryEndpoint: rg.fr-par.scw.cloud/example-namespace
+
+container:
+  # `name` and `min-scale` are per environment. The namespace already holds
+  # shop-prod and crm-prod; a name is the only thing between `apply` and
+  # another application's container.
+
+  # The `example-namespace` container namespace (crm infra/base.yaml). Also
+  # the resource the organisation check reads.
+  namespace-id: 00000000-0000-0000-0000-000000000000
+  # `<registryEndpoint>/hyde-mcp-gateway`. Untagged: the tag is a deploy-time input
+  # (HYDE_IMAGE_TAG).
+  image: rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway
+
+  # Two clients, stateless requests (src/mcp/http.ts): one instance carries
+  # the load; the second is headroom.
+  max-scale: 2
+  # The CLI accepts only whole GB on write (kinds/container.ts,
+  # formatMemoryLimitArg), so 1 GB is the floor here. Copied from the apps.
+  memory-limit-bytes: 1000000000
+  mvcpu-limit: 500
+  # Dockerfile: `ENV PORT=8080`; src/config.ts reads PORT.
+  port: 8080
+  protocol: http1
+  # The bearer token per client is the gate (D16); /health needs none.
+  privacy: public
+  # Bounds one tool call. A log or database read that runs longer is a bug.
+  timeout: 300s
+  sandbox: v2
+  scaling-option.concurrent-requests-threshold: 80
+
+  # Both probes on /health, which touches nothing (src/mcp/http.ts).
+  #   startup  - 5s x 12 = up to a minute to come up.
+  #   liveness - 30s x 3 = ~90s unresponsive before replacement.
+  # The API rejects a probe without interval, timeout and failure-threshold
+  # (3-50).
+  startup-probe.http.path: /health
+  startup-probe.interval: 5s
+  startup-probe.timeout: 3s
+  startup-probe.failure-threshold: 12
+  liveness-probe.http.path: /health
+  liveness-probe.interval: 30s
+  liveness-probe.timeout: 5s
+  liveness-probe.failure-threshold: 3
+
+# Runtime variables. Names and flags only. `apply` reads each value from the
+# environment (`pnpm infra:apply` loads the gitignored apply.env) and refuses,
+# listing every missing required name, before it writes anything. `diff`
+# compares only the set of names live, never values, so rotating a secret is
+# never drift.
+#
+# secret: true lands in secret-environment-variables, which `scw` returns only
+# as a digest; secret: false lands in environment-variables. The deploy
+# workflow (`apply --keep-secrets`) sends neither kind: every value here is set
+# by a local `pnpm infra:apply` and kept live by the workflow.
+variables:
+  # Loki: the Cockpit logs data source and a token with the `read_only_logs`
+  # scope (D20), sent as X-Token (src/config.ts readLokiConfig).
+  - { name: COCKPIT_LOGS_URL, required: true, secret: false }
+  - { name: COCKPIT_LOGS_READ_TOKEN, required: true, secret: true }
+  # LogQL stream selector per app. Unset, src/config.ts defaults to
+  # {resource_name="example-<app>-prod"}.
+  - { name: LOKI_STREAM_CRM, required: false, secret: false }
+  - { name: LOKI_STREAM_SHOP, required: false, secret: false }
+  # Connection strings of the redacted read-only database users (hyde-db),
+  # `mysql://<user>:<password>@<host>:3306/redacted?ssl=true`.
+  - { name: CRM_REDACTED_URL, required: true, secret: true }
+  - { name: SHOP_REDACTED_URL, required: true, secret: true }
+  # TLS to each RDB instance (src/db/connection.ts): the instance CA as PEM
+  # text, and the name its certificate carries (the bare instance id), which
+  # is checked instead of the host. NODE_ENV=production refuses to start
+  # without both, per app.
+  - { name: CRM_DATABASE_CA, required: true, secret: true }
+  - { name: SHOP_DATABASE_CA, required: true, secret: true }
+  - { name: CRM_DATABASE_CERT_NAME, required: true, secret: false }
+  - { name: SHOP_DATABASE_CERT_NAME, required: true, secret: false }
+  # One bearer token per client (D16, src/config.ts). A new client is a new
+  # HYDE_TOKEN_<CLIENT> line here and in apply.env.
+  - { name: HYDE_TOKEN_CLAUDE_CODE, required: true, secret: true }
+  - { name: HYDE_TOKEN_AGENT, required: true, secret: true }

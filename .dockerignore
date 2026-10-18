@@ -1,0 +1,8 @@
+# Secrets never enter the build context (test/infra/committed.test.ts).
+apply.env
+.env*
+**/node_modules
+.git
+.github
+.claude
+dist

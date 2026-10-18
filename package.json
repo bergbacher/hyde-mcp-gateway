@@ -11,7 +11,9 @@
     "schemas": "node scripts/fetch-log-schemas.ts",
     "fetch:redacted-schemas": "node scripts/fetch-redacted-schemas.ts",
     "test": "vitest run",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "infra:diff": "node scripts/infra/apply.ts diff production --strict",
+    "infra:apply": "node --env-file=apply.env scripts/infra/apply.ts apply production"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
@@ -22,7 +24,8 @@
   "devDependencies": {
     "@types/node": "^26.6.4",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "yaml": "^2.9.1"
   },
   "packageManager": "pnpm@12.9.1"
 }

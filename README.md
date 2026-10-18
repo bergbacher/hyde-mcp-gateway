@@ -123,3 +123,100 @@ pnpm test
 ## Database reader
 
 The server reads each app's database as `redacted_reader`, which can read only hyde-db's views. An admin creates the account and applies the views with `scripts/wizard/redacted-reader.sh`. The wizard writes `CRM_REDACTED_URL` and `SHOP_REDACTED_URL` to `apply.env`. First run, re-apply after a migration and rotation: [`docs/runbooks/redacted-reader.md`](docs/runbooks/redacted-reader.md).
+
+Tools so far: `ping(app)`. `app` is `"shop"` or `"crm"` on every tool.
+
+## Deploy
+
+The server runs as the Scaleway Serverless Container `hyde-mcp-gateway` in the apps' Scaleway project, region `fr-par`, namespace `example-namespace` (D15). `infra/base.yaml` and `infra/environments/production.yaml` declare it; `scripts/infra/apply.ts` reconciles it. Both are copied from crm's `infra/` and trimmed to the container kind.
+
+```sh
+pnpm infra:diff     # read the container back; fails on any drift or if it is absent
+pnpm infra:apply    # write it, values from apply.env
+```
+
+Every run first checks that the `scw` credential in scope reads the committed namespace as organisation and project `<organisation id>` and refuses otherwise. The organisation-level `SCW_*` secrets belong to a different Scaleway organisation and authenticate fine.
+
+### apply.env
+
+Gitignored, never committed, never in GitHub. `pnpm infra:apply` loads it with `node --env-file`. `apply` refuses, listing every missing required name, before it writes anything.
+
+| Key | Kind | Holds |
+| --- | --- | --- |
+| `COCKPIT_LOGS_URL` | plain | The Cockpit logs (Loki) data source URL, `https://<id>.logs.cockpit.fr-par.scw.cloud` |
+| `COCKPIT_LOGS_READ_TOKEN` | secret | Cockpit token, scope `read_only_logs` (D20) |
+| `LOKI_STREAM_CRM` | plain, optional | crm's LogQL stream selector; unset, `{resource_name="example-crm-prod"}` |
+| `LOKI_STREAM_SHOP` | plain, optional | shop's LogQL stream selector; unset, `{resource_name="example-shop-prod"}` |
+| `CRM_REDACTED_URL` | secret | crm's redacted reader, `mysql://<user>:<password>@<host>:3306/redacted?ssl=true` (hyde-db) |
+| `SHOP_REDACTED_URL` | secret | shop's redacted reader, same form (hyde-db) |
+| `CRM_DATABASE_CA` | secret | crm's RDB instance CA, PEM text |
+| `SHOP_DATABASE_CA` | secret | shop's RDB instance CA, PEM text |
+| `CRM_DATABASE_CERT_NAME` | plain | The name crm's instance certificate carries, the bare instance id |
+| `SHOP_DATABASE_CERT_NAME` | plain | The name shop's instance certificate carries, the bare instance id |
+| `HYDE_TOKEN_CLAUDE_CODE` | secret | Claude Code's bearer token, `openssl rand -hex 32` |
+| `HYDE_TOKEN_AGENT` | secret | the agent runner's bearer token, `openssl rand -hex 32` |
+| `HYDE_IMAGE_TAG` | | optional: image tag to run. Required to create the container; omitted, an update keeps the live image |
+| `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | | optional: the `scw` key, if your profile does not hold it |
+
+A PEM value spans lines: write it in double quotes with its real line breaks, which `node --env-file` keeps:
+
+```sh
+CRM_DATABASE_CA="-----BEGIN CERTIFICATE-----
+MIID...
+-----END CERTIFICATE-----"
+```
+
+Secret values land in `secret-environment-variables`, which `scw` returns only as a digest; plain ones in `environment-variables`. `diff` compares names, never values, so a rotation is never drift. A failing `scw` command is printed with every secret argument redacted. The image runs with `NODE_ENV=production`, in which the server refuses to start without both apps' URL (`ssl=true`), CA and certificate name.
+
+### Deploy workflow
+
+`.github/workflows/deploy.yml` runs on every push to `main`: fetch `schemas/` (`pnpm schemas`, `pnpm fetch:redacted-schemas`), verify the credential's target, build `Dockerfile`, push `rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
+
+The workflow reads three repository secrets, none of them a runtime value of the server:
+
+| Secret | Used for |
+| --- | --- |
+| `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | The deploy IAM application's key: registry push, `apply`, `diff` |
+| `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `example-org/crm` and `example-org/shop` for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on both; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
+
+`schemas/` is gitignored but its README. The `Dockerfile` copies it with the rest of the tree and stops the build when one of `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md` is missing.
+
+### First deploy
+
+Gather first (a human, once):
+
+- **The two instance CAs.** crm's is the PEM in `lib/database-ca.ts` on crm's `production` branch; shop's is the equivalent file in shop. Either can also be read with `scw rdb instance get-certificate <instance-id> region=fr-par`. They go into `CRM_DATABASE_CA` and `SHOP_DATABASE_CA`.
+- **The two certificate names**: the bare RDB instance id of each app's database, as the instance certificate carries it, into `CRM_DATABASE_CERT_NAME` and `SHOP_DATABASE_CERT_NAME`.
+- **The Loki URL**, into `COCKPIT_LOGS_URL`:
+  ```sh
+  scw cockpit data-source get <data-source-id> region=fr-par -o json | jq -r .url
+  ```
+- **The app-repo read token**: a fine-grained PAT or GitHub App token with Contents: read on `example-org/crm` and `example-org/shop`.
+
+Then:
+
+1. In the apps' Scaleway organisation, create an IAM application `hyde-mcp-gateway-deploy` with a policy granting `ContainersFullAccess` and `ContainerRegistryFullAccess`, and one API key for it.
+2. Set that key as repository secrets `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`. Repository secrets override the organisation-level pair; without them the workflow fails at the organisation check.
+3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`. Without it the workflow fails at the schema fetch.
+4. Write `apply.env` with every required key above.
+5. Fetch the schemas, push the first image and create the container, with the `scw` key in your shell and a `gh` login (or `GITHUB_TOKEN`) that can read both app repos:
+   ```sh
+   pnpm schemas                  # schemas/<app>.hyde-json.json
+   pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md
+   tag=$(git rev-parse HEAD)
+   echo "$SCW_SECRET_KEY" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
+   docker build --platform linux/amd64 -t rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:$tag .
+   docker push rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:$tag
+   HYDE_IMAGE_TAG=$tag pnpm infra:apply      # prints containerId= and endpoint=
+   pnpm infra:diff
+   ```
+6. Set the repository variable `HYDE_DEPLOY_ENABLED` to `true`. From then on every push to `main` deploys.
+7. Point the clients at `<endpoint>/mcp` with their tokens.
+
+### Rotate a client token
+
+1. Generate a new value: `openssl rand -hex 32`, and replace that client's line in `apply.env`.
+2. `pnpm infra:apply`. Without `HYDE_IMAGE_TAG` the running image stays; the container rolls to a new revision with the new token and `apply` returns once it is ready. From then on the old token gets 401.
+3. Give the client its new token (the agent runner's secret store; `HYDE_TOKEN_CLAUDE_CODE` in your environment for Claude Code).
+
+A new client is a new `HYDE_TOKEN_<CLIENT>` entry in `infra/base.yaml` `variables:` and in `apply.env`, then `pnpm infra:apply`. Removing one: delete both, run `pnpm infra:apply`, then `pnpm infra:diff`; if it still lists the old name live, remove that secret in the console.
