@@ -1,0 +1,24 @@
+{
+  "name": "hyde-mcp-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agents read production logs and database without seeing personal data.",
+  "type": "module",
+  "engines": { "node": ">=24.2" },
+  "scripts": {
+    "dev": "node src/mcp/main.ts",
+    "start": "node src/mcp/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "packageManager": "pnpm@12.9.1"
+}
