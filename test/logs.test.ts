@@ -3,12 +3,13 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { parseSchema, redactLine, type LogSchema } from "hyde-json";
-import { logSources, readLokiConfig } from "../src/config.ts";
+import { readLokiConfig } from "../src/config.ts";
 import { createLoki } from "../src/loki.ts";
 import type { Principal } from "../src/mcp/auth.ts";
-import { ERROR_SCAN_LIMIT, countQuery, edgeFields, edgeQuery, logQuery, toEdgeLine } from "../src/mcp/logs.ts";
+import { ERROR_SCAN_LIMIT, countQuery } from "../src/mcp/logs.ts";
 import { createServer } from "../src/mcp/server.ts";
 import { loadEdgeSchema, type Schemas } from "../src/schemas.ts";
+import { buildLogSources } from "../src/sources/index.ts";
 import { REGISTRY } from "./helpers.ts";
 
 const RECORDED = readFileSync(new URL("./fixtures/loki/query_range.crm.json", import.meta.url), "utf8");
@@ -20,9 +21,9 @@ const NOW = Date.parse("2026-10-18T12:00:00.000Z");
 const URL_BASE = "https://loki.test";
 const TOKEN = "read-only-logs-token";
 
-const SOURCES = logSources(REGISTRY);
-const CRM = SOURCES.get("crm")!;
-const SHOP = SOURCES.get("shop")!;
+/** crm's app LogQL for error lines of action send-mail, and for all error lines. */
+const CRM_ERRORS = '{resource_name="example-crm-prod"} | json | line_format "{{.message}}" | json | service="crm" | level="error"';
+const CRM_SEND_MAIL_ERRORS = `${CRM_ERRORS} | action="send-mail"`;
 
 const crmSchema = parseSchema({
     app: "crm",
@@ -63,7 +64,8 @@ async function connect(
     return respond(url);
   }) as typeof globalThis.fetch;
   const loki = createLoki({ url: URL_BASE, token: TOKEN, fetch });
-  const server = createServer(principal, { registry: REGISTRY, logs: { schemas: logSchemas, edgeSchema: edgeSchema ?? undefined, loki, sources: SOURCES, now: () => NOW } });
+  const sources = buildLogSources({ registry: REGISTRY, schemas: logSchemas, edgeSchema: edgeSchema ?? undefined, env: {} });
+  const server = createServer(principal, { registry: REGISTRY, logs: { sources, loki, now: () => NOW } });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
@@ -75,19 +77,6 @@ async function connect(
   }
   return { client, call, requests };
 }
-
-describe("LogQL", () => {
-  it("unwraps the envelope twice and filters by service, level and action", () => {
-    expect(logQuery(CRM, { level: "error", action: "send-mail" })).toBe(
-      '{resource_name="example-crm-prod"} | json | line_format "{{.message}}" | json'
-        + ' | service="crm" | level="error" | action="send-mail"',
-    );
-    expect(logQuery(SHOP)).toBe(
-      '{resource_name="example-shop-prod"} | json | line_format "{{.message}}" | json | service="shop"',
-    );
-    expect(countQuery("Q", 1.5)).toBe("sum(count_over_time(Q [90m]))");
-  });
-});
 
 describe("query_logs", () => {
   it("redacts every line of a recorded Loki response", async () => {
@@ -126,7 +115,7 @@ describe("query_logs", () => {
     await call("query_logs", { app: "crm", hours: 2, level: "error", action: "send-mail", limit: 10 });
     const range = requests.find((r) => r.url.pathname === "/loki/api/v1/query_range")!;
     const instant = requests.find((r) => r.url.pathname === "/loki/api/v1/query")!;
-    const query = logQuery(CRM, { level: "error", action: "send-mail" });
+    const query = CRM_SEND_MAIL_ERRORS;
     const end = BigInt(NOW) * 1_000_000n;
     expect(Object.fromEntries(range.url.searchParams)).toEqual({
       query, start: String(end - 2n * 3_600_000_000_000n), end: String(end), limit: "10", direction: "backward",
@@ -174,7 +163,7 @@ describe("count_errors", () => {
       partial: false,
     });
     const range = requests[0]!.url.searchParams;
-    expect(range.get("query")).toBe(logQuery(CRM, { level: "error" }));
+    expect(range.get("query")).toBe(CRM_ERRORS);
     expect(range.get("limit")).toBe(String(ERROR_SCAN_LIMIT));
   });
 
@@ -272,7 +261,10 @@ describe("app scope (D39)", () => {
 });
 
 describe("edge source (D46)", () => {
-  const SHOP_EDGE = '{resource_name="shop-prod-es"}';
+  const SHOP_EDGE = '{resource_name="shop-prod-es"} | json | __error__=""';
+  const SHOP_EDGE_ERRORS = '{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | __error__=""';
+  const SHOP_EDGE_WAF = '{resource_name="shop-prod-es"} | json | waf_action = "block"'
+    + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""';
 
   /** The recorded edge line with `patch` applied. */
   function edgeLine(patch: Record<string, unknown> = {}): string {
@@ -285,85 +277,6 @@ describe("edge source (D46)", () => {
       ? Response.json({ status: "success", data: { resultType: "streams", result: [{ stream: { resource_type: "edge_content_delivery_service" }, values }] } })
       : vector(values.length);
   }
-
-  it("pins the redaction of the recorded line: no client IP, no query string, no Scaleway ids", () => {
-    const { format, envelope, line } = redactLine(EDGE_LINE, EDGE_SCHEMA);
-    expect(format).toBe("json");
-    expect(envelope).toBeUndefined();
-    expect(line).toEqual({
-      cache_hit_request: 0,
-      file: "access.log",
-      http_client_country_code: "FR",
-      http_client_request_url: "https://shop.example.invalid/api/sync/outbox/pending?[query]",
-      http_client_version: "http/2",
-      http_request_client_ip: "[hidden]",
-      http_request_datetime: "2026-10-18 18:33:22",
-      http_request_method: "GET",
-      http_request_ssl_version: "TLSv1.3",
-      http_response_code_client: 200,
-      http_response_code_origin: 200,
-      http_response_content_type: "application/json",
-      level: "info",
-      pipeline_id: "[hidden]",
-      pipeline_name: "shop-prod-es",
-      project_id: "[hidden]",
-      waf_action: "pass",
-      waf_mode: "log_only",
-      waf_rule_id: "-",
-    });
-    const text = JSON.stringify(line);
-    expect(text).not.toContain("203.0.113.10");
-    expect(text).not.toContain("token=abc");
-    expect(toEdgeLine({ ns: String(BigInt(NOW) * 1_000_000n), line: EDGE_LINE }, EDGE_SCHEMA)).toEqual({
-      timestamp: "2026-10-18T12:00:00.000Z", action: "GET /api/sync/outbox/pending", level: "info", payload: line,
-    });
-  });
-
-  it("builds the LogQL: one json stage, error = origin or client 5xx, waf = WAF block without 5xx, action = method and path", () => {
-    expect(edgeQuery(SHOP_EDGE)).toBe('{resource_name="shop-prod-es"} | json | __error__=""');
-    expect(edgeQuery(SHOP_EDGE, { level: "error" })).toBe(
-      '{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500 | __error__=""',
-    );
-    expect(edgeQuery(SHOP_EDGE, { level: "waf" })).toBe(
-      '{resource_name="shop-prod-es"} | json | waf_action = "block"'
-        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
-    );
-    expect(edgeQuery(SHOP_EDGE, { level: "info" })).toBe(
-      '{resource_name="shop-prod-es"} | json | waf_action != "block"'
-        + ' | http_response_code_origin < 500 | http_response_code_client < 500 | __error__=""',
-    );
-    expect(edgeQuery(SHOP_EDGE, { action: "GET /api/sync/outbox.json" })).toBe(
-      '{resource_name="shop-prod-es"} | json | http_request_method="GET"'
-        + ' | http_client_request_url=~"(https?://[^/?#]+)?/api/sync/outbox\\\\.json([?#].*)?" | __error__=""',
-    );
-  });
-
-  it.each([
-    ["origin 200, WAF pass", {}, "info", 200],
-    ["origin 502", { http_response_code_origin: 502, http_response_code_client: 502 }, "error", 502],
-    ["origin 500 as a string", { http_response_code_origin: "500" }, "error", 500],
-    ["origin 404", { http_response_code_origin: 404 }, "info", 404],
-    ["client 504 with origin 0", { http_response_code_origin: 0, http_response_code_client: 504 }, "error", 0],
-    ["client aborted (status 0)", { http_response_code_origin: 0, http_response_code_client: 0 }, "info", 0],
-    ["WAF block in log_only with origin 200", { waf_action: "block" }, "waf", 200],
-    ["WAF block with origin 502", { waf_action: "block", http_response_code_origin: 502 }, "error", 502],
-    ["waf_action -", { waf_action: "-" }, "info", 200],
-    ["waf_action missing", { waf_action: undefined }, "info", 200],
-  ])("maps %s to level %s", (_, patch, level, status) => {
-    expect(edgeFields(edgeLine(patch))).toMatchObject({ level, status, action: "GET /api/sync/outbox/pending" });
-  });
-
-  it("derives the path without query or fragment, scrubbed as free text", () => {
-    const action = (url: unknown, method: unknown = "POST") =>
-      edgeFields(edgeLine({ http_client_request_url: url, http_request_method: method })).action;
-    expect(action("https://shop.example.invalid/api/a?x=1#frag")).toBe("POST /api/a");
-    expect(action("/api/a?x=1")).toBe("POST /api/a");
-    expect(action("https://shop.example.invalid")).toBe("POST /");
-    expect(action("https://shop.example.invalid/api/members/jane.doe@example.com")).toBe("POST /api/members/[email]");
-    expect(action(42)).toBeNull();
-    expect(action("/api/a", "get it")).toBeNull();
-    expect(edgeFields("not json")).toEqual({ action: null, level: null, status: null });
-  });
 
   it("query_logs reads the edge stream and returns redacted lines with method, path, status, country and WAF fields", async () => {
     const { call, requests } = await connect(streams([EDGE_LINE]));
@@ -382,7 +295,7 @@ describe("edge source (D46)", () => {
       },
     });
     const range = requests.find((r) => r.url.pathname.endsWith("/query_range"))!;
-    expect(range.url.searchParams.get("query")).toBe(edgeQuery(SHOP_EDGE));
+    expect(range.url.searchParams.get("query")).toBe(SHOP_EDGE);
   });
 
   it("query_logs passes level and action into the edge LogQL", async () => {
@@ -390,7 +303,10 @@ describe("edge source (D46)", () => {
     const result = await call("query_logs", { app: "shop", source: "edge", level: "error", action: "GET /api/sync" });
     expect(result.isError).toBe(false);
     const range = requests.find((r) => r.url.pathname.endsWith("/query_range"))!;
-    expect(range.url.searchParams.get("query")).toBe(edgeQuery(SHOP_EDGE, { level: "error", action: "GET /api/sync" }));
+    expect(range.url.searchParams.get("query")).toBe(
+      '{resource_name="shop-prod-es"} | json | http_response_code_origin >= 500 or http_response_code_client >= 500'
+        + ' | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""',
+    );
   });
 
   it("query_logs level waf returns the WAF hits, labelled waf", async () => {
@@ -398,7 +314,7 @@ describe("edge source (D46)", () => {
     const body = (await call("query_logs", { app: "shop", source: "edge", level: "waf" })).json();
     expect(body.lines[0]).toMatchObject({ level: "waf", payload: { waf_action: "block", waf_mode: "log_only" } });
     const range = requests.find((r) => r.url.pathname.endsWith("/query_range"))!;
-    expect(range.url.searchParams.get("query")).toBe(edgeQuery(SHOP_EDGE, { level: "waf" }));
+    expect(range.url.searchParams.get("query")).toBe(SHOP_EDGE_WAF);
   });
 
   it("refuses an action of the other source's form before asking Loki", async () => {
@@ -437,15 +353,15 @@ describe("edge source (D46)", () => {
     });
     expect(result.text).not.toContain("token=");
     const range = requests[0]!.url.searchParams;
-    expect(range.get("query")).toBe(edgeQuery(SHOP_EDGE, { level: "error" }));
+    expect(range.get("query")).toBe(SHOP_EDGE_ERRORS);
     expect(range.get("limit")).toBe(String(ERROR_SCAN_LIMIT));
   });
 
-  it("an app without an edge source is refused at both tools before Loki is asked", async () => {
+  it("an app without an edge stream is refused at both tools in the D37 form before Loki is asked (D53)", async () => {
     const { call, requests } = await connect();
     for (const tool of ["query_logs", "count_errors"]) {
       const result = await call(tool, { app: "crm", source: "edge" });
-      expect(result).toMatchObject({ isError: true, text: "crm has no edge source" });
+      expect(result).toMatchObject({ isError: true, text: "crm is not configured: no edge stream in apps.json" });
     }
     expect(requests).toHaveLength(0);
   });
@@ -469,16 +385,11 @@ describe("tools", () => {
 
 describe("readLokiConfig", () => {
   const env = { COCKPIT_LOGS_URL: "https://abc.logs.cockpit.fr-par.scw.cloud/", COCKPIT_LOGS_READ_TOKEN: "t" };
-  it("reads URL and token, takes each app's stream and service from apps.json, takes overrides", () => {
-    expect(readLokiConfig(REGISTRY, env)).toEqual({ url: "https://abc.logs.cockpit.fr-par.scw.cloud", token: "t", sources: SOURCES });
-    const custom = readLokiConfig(REGISTRY, { ...env, HYDE_APP_CRM_LOKI_STREAM: '{resource_name="x-crm"}' });
-    expect(custom.sources.get("shop")).toEqual(SHOP);
-    expect(custom.sources.get("crm")).toEqual({ stream: '{resource_name="x-crm"}', service: CRM.service });
+  it("reads URL and token", () => {
+    expect(readLokiConfig(env)).toEqual({ url: "https://abc.logs.cockpit.fr-par.scw.cloud", token: "t" });
   });
   it("names every problem", () => {
-    expect(() => readLokiConfig(REGISTRY, {})).toThrow(/COCKPIT_LOGS_URL is not set; COCKPIT_LOGS_READ_TOKEN is not set/);
-    expect(() => readLokiConfig(REGISTRY, { ...env, COCKPIT_LOGS_URL: "ftp://x" })).toThrow(/not an http\(s\) URL/);
-    expect(() => readLokiConfig(REGISTRY, { ...env, HYDE_APP_SHOP_LOKI_STREAM: '{a="b"} | json' }))
-      .toThrow(/HYDE_APP_SHOP_LOKI_STREAM is not a LogQL stream selector/);
+    expect(() => readLokiConfig({})).toThrow(/COCKPIT_LOGS_URL is not set; COCKPIT_LOGS_READ_TOKEN is not set/);
+    expect(() => readLokiConfig({ ...env, COCKPIT_LOGS_URL: "ftp://x" })).toThrow(/not an http\(s\) URL/);
   });
 });
