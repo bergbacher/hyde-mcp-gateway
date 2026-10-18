@@ -179,6 +179,10 @@ jobs:
           set -euo pipefail
           node scripts/infra/apply.ts apply production --keep-secrets > "$RUNNER_TEMP/apply.log"
           endpoint=$(sed -n 's/^endpoint=//p' "$RUNNER_TEMP/apply.log")
+          if [ -z "$endpoint" ]; then
+            echo "::error::apply printed no endpoint; the smoke check would run against an empty URL"
+            exit 1
+          fi
           echo "::add-mask::${endpoint#https://}"
           cat "$RUNNER_TEMP/apply.log"
           echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
