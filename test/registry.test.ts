@@ -7,7 +7,7 @@ import { query } from "../scripts/registry.ts";
 import { readConfig, readLokiConfig } from "../src/config.ts";
 import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
-import { appNames, appVariables, envPrefix, loadRegistry, parseRegistry } from "../src/registry.ts";
+import { appNames, appVariables, envPrefix, EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry } from "../src/registry.ts";
 import { connectInMemory, REGISTRY, REGISTRY_WITH_THIRD, registryJsonWithThirdApp, textOf, THIRD_APP } from "./helpers.ts";
 
 const PEM = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
@@ -25,8 +25,8 @@ function third(path: string, value: unknown) {
 }
 
 describe("apps.json", () => {
-  it("the committed registry is valid and registers its apps in order", () => {
-    expect(appNames(loadRegistry())).toEqual(appNames(REGISTRY));
+  it("the committed example registry is valid and registers its apps in order", () => {
+    expect(appNames(loadRegistry(EXAMPLE_REGISTRY_FILE))).toEqual(["shop", "crm"]);
     expect(REGISTRY.apps.size).toBeGreaterThan(0);
     for (const [name, entry] of REGISTRY.apps) expect(entry.name).toBe(name);
   });
@@ -68,7 +68,7 @@ describe("apps.json", () => {
   it("loadRegistry names a file that is missing or not JSON", () => {
     const dir = mkdtempSync(join(tmpdir(), "hyde-registry-"));
     try {
-      expect(() => loadRegistry(join(dir, "none.json"))).toThrow(/not readable/);
+      expect(() => loadRegistry(join(dir, "apps.json"))).toThrow(/apps\.json is missing: copy apps\.example\.json to apps\.json/);
       writeFileSync(join(dir, "bad.json"), "{");
       expect(() => loadRegistry(join(dir, "bad.json"))).toThrow(/is not JSON/);
     } finally {

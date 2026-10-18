@@ -15,8 +15,10 @@ RUN corepack enable
 # its members' manifests to install from the root lockfile. .dockerignore
 # keeps node_modules, apply.env and .env* out of the context.
 #
-# The tree includes apps.json, the app registry the server reads at startup
-# (D38), and schemas/, not committed but for edge.hyde-json.json (D46): `pnpm schemas` (log field
+# The tree includes apps.json, the app registry the server reads at startup,
+# an operator file that is not committed (D38; the deploy workflow writes it
+# from a repository secret), and schemas/, not committed but for
+# edge.hyde-json.json (D46): `pnpm schemas` (log field
 # schemas) and `pnpm fetch:redacted-schemas` (redacted-schema.md) fill it from
 # the app repos' main before the build (deploy.yml; README, First deploy). The
 # server serves the registered apps whose files are present (D37); an app
@@ -24,7 +26,7 @@ RUN corepack enable
 # useless, so the build stops unless at least one app in apps.json has its
 # complete pair: schemas/<app>.hyde-json.json and schemas/<app>.redacted-schema.md.
 COPY . .
-RUN test -s apps.json || { echo "apps.json is missing: the server cannot start without its app registry" >&2; exit 1; }; \
+RUN test -s apps.json || { echo "apps.json is missing: copy apps.example.json to apps.json and register your apps; the server cannot start without its app registry" >&2; exit 1; }; \
     apps=$(node -e 'console.log(Object.keys(JSON.parse(require("fs").readFileSync("apps.json", "utf8")).apps).join(" "))') || { echo "apps.json is not a registry" >&2; exit 1; }; \
     ready=""; \
     for app in $apps; do \

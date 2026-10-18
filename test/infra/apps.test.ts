@@ -9,20 +9,13 @@ import { appVariableSpecs, loadConfig, type InfraConfig, type KindContext } from
 import * as container from "../../scripts/infra/kinds/container.ts";
 import { parseRegistry } from "../../src/registry.ts";
 import { registryJsonWithThirdApp, REGISTRY_WITH_THIRD } from "../helpers.ts";
-import { LIVE, config, makeExec } from "./fixtures.ts";
+import { LIVE, config, loadExampleConfig, makeExec } from "./fixtures.ts";
 
 const root = path.resolve(import.meta.dirname, "..", "..");
 
-/** loadConfig over the committed infra/ with `registry` as apps.json. */
+/** loadConfig over the committed infra/ and the example overlay, with `registry` as apps.json. */
 function load(registry: string, base?: string): InfraConfig {
-  return loadConfig("production", {
-    repoRoot: root,
-    readFileSync: (p) => {
-      if (p === path.join(root, "apps.json")) return registry;
-      if (base !== undefined && p === path.join(root, "infra", "base.yaml")) return base;
-      return fs.readFileSync(p, "utf8");
-    },
-  });
+  return loadExampleConfig("production", { "apps.json": registry, ...(base === undefined ? {} : { "infra/base.yaml": base }) });
 }
 
 /** The fixture config plus the per-app variables of the registry with a third app. */
@@ -40,7 +33,7 @@ describe("loadConfig derives each app's variables from apps.json", () => {
       { name: "HYDE_APP_HELP_DESK_DATABASE_CA", required: false, secret: true, app: "help-desk" },
     ]);
     // The global ones stay as infra/base.yaml lists them.
-    expect(c.variables.filter((v) => !v.app).map((v) => v.name)).toEqual(loadConfig("production").variables.filter((v) => !v.app).map((v) => v.name));
+    expect(c.variables.filter((v) => !v.app).map((v) => v.name)).toEqual(loadExampleConfig("production").variables.filter((v) => !v.app).map((v) => v.name));
   });
 
   it("refuses an invalid registry and a per-app variable listed by hand", () => {
@@ -48,7 +41,7 @@ describe("loadConfig derives each app's variables from apps.json", () => {
     expect(() => load(JSON.stringify({ apps: { Bad: {} } }))).toThrow(/not a valid app registry/);
     const base = fs.readFileSync(path.join(root, "infra", "base.yaml"), "utf8")
       + "  - { name: HYDE_APP_SHOP_REDACTED_URL, required: true, secret: true }\n";
-    expect(() => load(fs.readFileSync(path.join(root, "apps.json"), "utf8"), base)).toThrow(/derived from apps\.json, never listed by hand/);
+    expect(() => load(fs.readFileSync(path.join(root, "apps.example.json"), "utf8"), base)).toThrow(/derived from apps\.json, never listed by hand/);
   });
 
   it("appVariableSpecs follows the registry's order and prefix", () => {

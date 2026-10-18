@@ -1,5 +1,4 @@
-// The hyde-mcp-gateway container: `scw container container`. Copied from crm's
-// kinds/container.ts (itself shop's). Departures: the image-tag variable is
+// The hyde-mcp-gateway container: `scw container container`. The image-tag variable is
 // HYDE_IMAGE_TAG and an update without one keeps the live image, so a local
 // `apply` that only rotates a secret cannot move the running revision.
 //
@@ -229,7 +228,7 @@ export function apply(ctx: KindContext, live: LiveContainer | null): void {
 
 // --- awaitSettled ------------------------------------------------------------
 // `create` and every `update` leave the container in a transient state for
-// ~10-20s. crm measured that the first read after `update` is already
+// ~10-20s. Measured on the apps: the first read after `update` is already
 // `updating`, and still requires several consecutive settled reads because a
 // create was once followed by an immediately rejected write. Kept: `apply`
 // reports success only once the new revision is up.

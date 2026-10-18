@@ -1,13 +1,12 @@
 // Refuses to touch Scaleway unless the credential in scope reaches the
-// committed target. Copied from crm's scripts/infra/organisation.ts;
-// it also checks the project, which crm leaves to a secret.
+// configured target (infra/environments/<env>.yaml): organisation and project.
 //
-// Why: `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` exist as organisation-level
-// GitHub secrets for a different Scaleway organisation, and
-// repository secrets of the same name only override them. Without the
+// Why: `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` may also exist as organisation-level
+// GitHub secrets for a different Scaleway organisation, and repository
+// secrets of the same name only override them. Without the
 // repository pair, that key authenticates fine and a deploy would succeed in
 // the wrong place. The credential does not state its organisation, so the
-// committed container namespace is read: another organisation's key either
+// configured container namespace is read: another organisation's key either
 // cannot read it (non-zero exit) or reports a different `organization_id`.
 // The namespace, not the project, because a deploy key scoped to Containers
 // and Registry may not read projects.
@@ -33,7 +32,7 @@ export function assertTarget(target: Target, deps: { exec: ScwExecutor; env: Rec
   ] as const) {
     const declared = deps.env[name]?.trim();
     if (declared && declared !== expected) {
-      throw new Error(`Refusing to run: ${name} is ${declared}, but infra/base.yaml targets ${expected}. Unset it.`);
+      throw new Error(`Refusing to run: ${name} is ${declared}, but the configured target (infra/environments) is ${expected}. Unset it.`);
     }
   }
 
@@ -50,14 +49,14 @@ export function assertTarget(target: Target, deps: { exec: ScwExecutor; env: Rec
   if (namespace.organization_id !== target.organizationId) {
     throw new Error(
       `Refusing to run: the credential reads container namespace ${target.namespaceId} as organisation ` +
-        `${namespace.organization_id ?? "<none>"}, but infra/base.yaml targets ${target.organizationId}. ` +
+        `${namespace.organization_id ?? "<none>"}, but the configured target (infra/environments) is ${target.organizationId}. ` +
         "Set this repository's own SCW_ACCESS_KEY / SCW_SECRET_KEY; the organisation-level pair belongs elsewhere.",
     );
   }
   if (namespace.project_id !== target.projectId) {
     throw new Error(
       `Refusing to run: container namespace ${target.namespaceId} is in project ${namespace.project_id ?? "<none>"}, ` +
-        `but infra/base.yaml targets ${target.projectId}.`,
+        `but the configured target (infra/environments) is ${target.projectId}.`,
     );
   }
 }

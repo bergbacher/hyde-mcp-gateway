@@ -1,0 +1,33 @@
+# Production overlay: copy to production.yaml (gitignored, an operator file;
+# README, Operator files) and replace every placeholder with your own values.
+# Deep-merged onto infra/base.yaml by scripts/infra/config.ts.
+#
+# Runtime variables are declared once, in infra/base.yaml `variables:` (the
+# per-app ones derived from apps.json): an overlay list would replace that
+# list whole. Their production values come from apply.env (README, Deploy).
+
+# Every subcommand compares these against the `organization_id` and
+# `project_id` of `container.namespace-id`, read live, and refuses on a
+# mismatch: an `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` of another organisation
+# authenticates fine (scripts/infra/organisation.ts). The workflow derives
+# SCW_DEFAULT_PROJECT_ID from projectId, so it is never a secret.
+organizationId: 00000000-0000-0000-0000-000000000000
+projectId: 00000000-0000-0000-0000-000000000000
+
+# The registry namespace the image is pushed to, usually the apps' own.
+registryEndpoint: rg.fr-par.scw.cloud/example-namespace
+
+container:
+  # A name is the only thing between `apply` and another application's
+  # container in a shared namespace.
+  name: hyde-mcp-gateway
+  # The container namespace the apps run in. Also the resource the
+  # organisation check reads.
+  namespace-id: 00000000-0000-0000-0000-000000000000
+  # `<registryEndpoint>/hyde-mcp-gateway`. Untagged: the tag is a deploy-time
+  # input (HYDE_IMAGE_TAG).
+  image: rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway
+  # Scale to zero between sessions: the server holds no state and starts in
+  # about a second (Node, no build step). Set 1 if a cold start ever stalls a
+  # client.
+  min-scale: 0

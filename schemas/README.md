@@ -1,6 +1,6 @@
 # schemas/
 
-Per-app documents the server reads at startup, fetched from the `main` of each repo [`apps.json`](../apps.json) registers and never committed: the app repos own them (D23), and everything here but this README and `edge.hyde-json.json` is gitignored. One file per app and kind, named `<app>.<kind>`:
+Per-app documents the server reads at startup, fetched from the `main` of each repo `apps.json` registers (your operator file; [`apps.example.json`](../apps.example.json) shows the shape) and never committed: the app repos own them (D23), and everything here but this README and `edge.hyde-json.json` is gitignored. One file per app and kind, named `<app>.<kind>`:
 
 | File | Source in the app repo | Fetched by | Read by | At startup |
 |---|---|---|---|---|
@@ -9,4 +9,4 @@ Per-app documents the server reads at startup, fetched from the `main` of each r
 
 `edge.hyde-json.json` is the exception: the log field schema of Scaleway Edge Services access logs, read by `query_logs` and `count_errors` with `source: "edge"` (D46). No app writes those lines, so hyde-mcp-gateway owns and commits it; `loadEdgeSchema` refuses to start the server when it is missing or invalid, and `edge` is therefore not a valid app name.
 
-`<app>` is an app's name in `apps.json`, today `shop` (`example-org/shop`) or `crm` (`example-org/crm`). Both scripts take `--app <app>` (repeatable) to fetch only those apps, write every app that fetches and validates, warn for the others, and fail only when nothing was written or, with `--strict`, when any requested app failed. Both need `GITHUB_TOKEN`, `GH_TOKEN` or a `gh` login. Both loaders live in [`src/schemas.ts`](../src/schemas.ts).
+`<app>` is an app's name in `apps.json`, for example `shop` (`example-org/shop`) or `crm` (`example-org/crm`) in the example registry. Both scripts take `--app <app>` (repeatable) to fetch only those apps, write every app that fetches and validates, warn for the others, and fail only when nothing was written or, with `--strict`, when any requested app failed. Both need `GITHUB_TOKEN`, `GH_TOKEN` or a `gh` login. Both loaders live in [`src/schemas.ts`](../src/schemas.ts).

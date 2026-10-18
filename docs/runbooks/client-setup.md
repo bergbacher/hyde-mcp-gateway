@@ -1,6 +1,6 @@
 # Client setup
 
-How a client reaches the production server: Claude Code's `.mcp.json` (D9), issuing and rotating a client token (D16), and a first analysis that checks no personal data comes through. the agent runner's configuration lives in the agent repo (D10).
+How a client reaches the production server: Claude Code's `.mcp.json` (D9), issuing and rotating a client token (D16), and a first analysis that checks no personal data comes through. An agent runner (D5, D10) configures the same endpoint with its own token in its own secret store.
 
 `<endpoint>` is the container's host name. `pnpm infra:apply` prints it as `endpoint=` (README, Deploy); it is not a secret. The token is.
 
@@ -102,7 +102,7 @@ HYDE_TOKEN_CLAUDE_CODE_APPS=*
 
 ### Rotate (or issue)
 
-Run from the repo root, with the `scw` key for the apps' Scaleway project in scope (README, Deploy). The examples rotate Claude Code's token; for another client, replace `CLAUDE_CODE` and the Keychain service name.
+Run from the repo root, with the `scw` key for your Scaleway project in scope (README, Deploy). The examples rotate Claude Code's token; for another client, replace `CLAUDE_CODE` and the Keychain service name.
 
 1. Keep the old token for the check in step 5. Then generate the new one without printing it:
 

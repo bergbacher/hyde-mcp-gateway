@@ -1,13 +1,11 @@
 // Loads and merges the committed infrastructure configuration
 // (infra/base.yaml + infra/environments/<env>.yaml), and the `scw` seam every
-// kind goes through. Copied from crm's scripts/infra/config.ts and
-// trimmed to the container kind; crm's open values are gone because every
-// value here is known.
+// kind goes through. Trimmed to the container kind.
 
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { appVariables, parseRegistry, type Registry } from "../../src/registry.ts";
+import { appVariables, missingRegistry, parseRegistry, type Registry } from "../../src/registry.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
@@ -131,7 +129,10 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
   try {
     overlayText = read(overlayPath);
   } catch {
-    throw new Error(`No infrastructure overlay for environment "${environment}" (expected ${overlayPath}).`);
+    const hint = environment === "production"
+      ? " It is an operator file, not committed: copy infra/environments/production.example.yaml to production.yaml and fill in your Scaleway ids (README, Operator files)."
+      : "";
+    throw new Error(`No infrastructure overlay for environment "${environment}" (expected ${overlayPath}).${hint}`);
   }
 
   const merged = deepMerge(parseInfraYaml(baseText), parseInfraYaml(overlayText)) as Omit<InfraConfig, "environment">;
@@ -140,7 +141,7 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
   try {
     registryText = read(registryPath);
   } catch {
-    throw new Error(`Could not read the app registry at ${registryPath}`);
+    throw new Error(missingRegistry(registryPath));
   }
   let registryJson: unknown;
   try {
@@ -151,12 +152,21 @@ export function loadConfig(environment: string, deps: LoadConfigDeps = {}): Infr
   const derived = appVariableSpecs(parseRegistry(registryJson, registryPath));
 
   // Per environment, never in the base, so environments cannot collide on one
-  // name in a namespace that also holds shop's and crm's containers.
+  // name in a namespace that may also hold the apps' own containers.
   if (!merged.container?.name) {
     throw new Error(`container.name is missing for environment "${environment}" (infra/environments/${environment}.yaml).`);
   }
-  if (!merged.organizationId || !merged.projectId) {
-    throw new Error("organizationId and projectId must be set in infra/base.yaml: every run is verified against them.");
+  const missing = [
+    ["organizationId", merged.organizationId],
+    ["projectId", merged.projectId],
+    ["registryEndpoint", merged.registryEndpoint],
+    ["container.namespace-id", merged.container["namespace-id"]],
+    ["container.image", merged.container.image],
+  ].filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(", ")} must be set in infra/environments/${environment}.yaml: every run is verified against the organisation and project, and the container lives in that namespace.`,
+    );
   }
   const declared = merged.variables ?? [];
   for (const v of declared) {

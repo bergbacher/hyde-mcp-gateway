@@ -1,6 +1,5 @@
-// Driver for hyde-mcp-gateway's committed infrastructure (infra/). Copied from
-// crm's scripts/infra/apply.ts and trimmed to the container kind: no
-// kind registry, no --only.
+// Driver for hyde-mcp-gateway's committed infrastructure (infra/), trimmed to
+// the container kind: no kind registry, no --only.
 //
 //   node scripts/infra/apply.ts diff  <environment> [--strict]
 //   node scripts/infra/apply.ts apply <environment> [--keep-secrets]

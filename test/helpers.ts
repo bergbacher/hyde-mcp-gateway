@@ -3,12 +3,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Principal } from "../src/mcp/auth.ts";
 import { createServer, type ServerOptions } from "../src/mcp/server.ts";
-import { loadRegistry, parseRegistry, REGISTRY_FILE, type Registry } from "../src/registry.ts";
+import { EXAMPLE_REGISTRY_FILE, loadRegistry, parseRegistry, type Registry } from "../src/registry.ts";
 
-/** The committed apps.json. */
-export const REGISTRY: Registry = loadRegistry();
+/** The committed apps.example.json: `shop` and `crm`. */
+export const REGISTRY: Registry = loadRegistry(EXAMPLE_REGISTRY_FILE);
 
-/** A third app's entry, as a new team would add it: no code change, one apps.json entry. */
+/** A third app's entry, as an operator would add it: no code change, one apps.json entry. */
 export const THIRD_APP = {
   repo: "example-org/help-desk",
   logSchemaPath: "config/hyde-json.json",
@@ -24,9 +24,9 @@ export const THIRD_APP = {
   },
 };
 
-/** The committed apps.json as JSON, plus `help-desk` (THIRD_APP). */
+/** The committed apps.example.json as JSON, plus `help-desk` (THIRD_APP). */
 export function registryJsonWithThirdApp(): { apps: Record<string, unknown> } {
-  const json = JSON.parse(readFileSync(REGISTRY_FILE, "utf8")) as { apps: Record<string, unknown> };
+  const json = JSON.parse(readFileSync(EXAMPLE_REGISTRY_FILE, "utf8")) as { apps: Record<string, unknown> };
   return { apps: { ...json.apps, "help-desk": THIRD_APP } };
 }
 

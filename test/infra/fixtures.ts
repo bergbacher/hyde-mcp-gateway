@@ -1,5 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
 import { vi } from "vitest";
-import type { InfraConfig, ScwExecResult } from "../../scripts/infra/config.ts";
+import { loadConfig, type InfraConfig, type ScwExecResult } from "../../scripts/infra/config.ts";
 import type { LiveContainer } from "../../scripts/infra/kinds/container.ts";
 
 export function config(
@@ -74,4 +76,29 @@ export function makeExec(list: unknown[], get: unknown = LIVE) {
     if (args.includes("get")) return { stdout: JSON.stringify(get), exitCode: 0 };
     return { stdout: "{}", exitCode: 0 };
   });
+}
+
+const ROOT = path.resolve(import.meta.dirname, "..", "..");
+
+/**
+ * Reads the repo's files with the operator files (apps.json,
+ * infra/environments/<env>.yaml, both gitignored) replaced by their committed
+ * examples, so the tests see the same tree in every clone. `overrides` maps a
+ * repo-relative path to its text.
+ */
+export function exampleReader(overrides: Record<string, string> = {}) {
+  const operator: Record<string, string> = {
+    "apps.json": "apps.example.json",
+    "infra/environments/production.yaml": "infra/environments/production.example.yaml",
+  };
+  return (p: string): string => {
+    const rel = path.relative(ROOT, p);
+    if (Object.hasOwn(overrides, rel)) return overrides[rel]!;
+    return fs.readFileSync(path.join(ROOT, operator[rel] ?? rel), "utf8");
+  };
+}
+
+/** loadConfig over the committed infra/ and the example operator files. */
+export function loadExampleConfig(environment = "production", overrides: Record<string, string> = {}): InfraConfig {
+  return loadConfig(environment, { repoRoot: ROOT, readFileSync: exampleReader(overrides) });
 }

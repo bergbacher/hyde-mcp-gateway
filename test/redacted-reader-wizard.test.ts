@@ -3,11 +3,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { EXAMPLE_REGISTRY_FILE } from "../src/registry.ts";
 import { REGISTRY, registryJsonWithThirdApp, THIRD_APP } from "./helpers.ts";
 
 const WIZARD = join(import.meta.dirname, "..", "scripts", "wizard");
 const SCRIPT = join(WIZARD, "redacted-reader.sh");
 const FETCH = join(WIZARD, "fetch-redacted-sql.sh");
+/** The scripts read apps.json; the tests point them at the committed example. */
+const EXAMPLE_ENV = { ...process.env, HYDE_APPS_FILE: EXAMPLE_REGISTRY_FILE };
 const KNOWN_PASSWORD = "Aa1-knownReaderPassword0123456789";
 const shop = REGISTRY.apps.get("shop")!;
 const crm = REGISTRY.apps.get("crm")!;
@@ -32,7 +35,7 @@ function appFiles(dir: string, app: string, view: string): string {
 }
 
 function wizard(args: string[], env: Record<string, string> = {}) {
-  const run = spawnSync("bash", [SCRIPT, ...args], { env: { ...process.env, ROTATE: "0", ...env }, input: "", encoding: "utf8" });
+  const run = spawnSync("bash", [SCRIPT, ...args], { env: { ...process.env, ROTATE: "0", HYDE_APPS_FILE: EXAMPLE_REGISTRY_FILE, ...env }, input: "", encoding: "utf8" });
   return { status: run.status, out: `${run.stdout}${run.stderr}`, stderr: run.stderr };
 }
 
@@ -164,10 +167,10 @@ describe("a third app in apps.json (D38)", () => {
   });
 
   it("fetch-redacted-sql.sh takes the CA ref from the entry and refuses an unregistered app", () => {
-    const run = spawnSync("bash", [FETCH, "--dry-run", "--app", "crm"], { encoding: "utf8" });
+    const run = spawnSync("bash", [FETCH, "--dry-run", "--app", "crm"], { env: EXAMPLE_ENV, encoding: "utf8" });
     expect(run.status).toBe(0);
     expect(run.stdout).toContain(`would fetch ${crm.database.caSource.repo}@${crm.database.caSource.ref}:${crm.database.caSource.path}`);
-    const bad = spawnSync("bash", [FETCH, "--dry-run", "--app", "help-desk"], { encoding: "utf8" });
+    const bad = spawnSync("bash", [FETCH, "--dry-run", "--app", "help-desk"], { env: EXAMPLE_ENV, encoding: "utf8" });
     expect(bad.status).toBe(2);
     expect(bad.stderr).toMatch(/--app needs one of shop crm/);
   });

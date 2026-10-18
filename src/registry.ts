@@ -1,5 +1,6 @@
 // The app registry (D38): apps are configuration, not code. `apps.json` at the
-// repository root, committed and free of secrets, holds one entry per app:
+// repository root, free of secrets but the operator's own (gitignored; copy
+// `apps.example.json` to start), holds one entry per app:
 // where its log field schema, redacted schema and hyde-db scripts live, its
 // Loki stream selector and `service` value, and its database endpoint with the
 // certificate name and the source of its instance CA, and optionally a second
@@ -16,6 +17,8 @@ import { z } from "zod";
 export type App = string;
 
 export const REGISTRY_FILE = fileURLToPath(new URL("../apps.json", import.meta.url));
+/** The committed example registry: two apps, `shop` and `crm`, with placeholder hosts and ids. */
+export const EXAMPLE_REGISTRY_FILE = fileURLToPath(new URL("../apps.example.json", import.meta.url));
 
 /** Lower case, starts with a letter; digits and `-` after. Upper-cased with `-` → `_` it is the env infix. */
 export const APP_NAME = /^[a-z][a-z0-9-]*$/;
@@ -92,6 +95,7 @@ export function loadRegistry(path: string = REGISTRY_FILE): Registry {
   try {
     raw = readFileSync(path, "utf8");
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new Error(missingRegistry(path));
     throw new Error(`App registry ${path} not readable: ${(e as Error).message}`);
   }
   let json: unknown;
@@ -101,6 +105,11 @@ export function loadRegistry(path: string = REGISTRY_FILE): Registry {
     throw new Error(`App registry ${path} is not JSON`);
   }
   return parseRegistry(json, path);
+}
+
+/** The error for a registry file that does not exist: apps.json is an operator file, not committed. */
+export function missingRegistry(path: string): string {
+  return `App registry ${path} is missing: copy apps.example.json to apps.json and register your apps (README, Operator files)`;
 }
 
 export function appNames(registry: Registry): App[] {

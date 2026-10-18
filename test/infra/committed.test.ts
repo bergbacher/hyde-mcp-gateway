@@ -5,15 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { appVariableSpecs, loadConfig } from "../../scripts/infra/config.ts";
-import { appNames, appVariables, loadRegistry } from "../../src/registry.ts";
+import { appNames, appVariables, EXAMPLE_REGISTRY_FILE, loadRegistry } from "../../src/registry.ts";
+import { exampleReader, loadExampleConfig } from "./fixtures.ts";
 
 const root = path.resolve(import.meta.dirname, "..", "..");
 const read = (file: string) => fs.readFileSync(path.join(root, file), "utf8");
 
 describe("committed infra/", () => {
-  const config = loadConfig("production");
+  const config = loadExampleConfig("production");
 
-  it("declares hyde-mcp-gateway in the apps' namespace, fr-par, scale to zero, probes on /health", () => {
+  it("declares hyde-mcp-gateway, fr-par, scale to zero, probes on /health", () => {
     expect(config.region).toBe("fr-par");
     expect(config.container).toMatchObject({
       name: "hyde-mcp-gateway",
@@ -25,7 +26,7 @@ describe("committed infra/", () => {
   });
 
   // Derived from apps.json, never listed by hand (D38).
-  const registry = loadRegistry();
+  const registry = loadRegistry(EXAMPLE_REGISTRY_FILE);
   const perApp = Object.fromEntries(appNames(registry).flatMap((app) => {
     const vars = appVariables(app);
     return [[vars.redactedUrl, { required: false, secret: true }], [vars.databaseCa, { required: false, secret: true }]];
@@ -45,9 +46,10 @@ describe("committed infra/", () => {
     expect(new Set(config.variables.map((v) => v.name)).size).toBe(config.variables.length);
   });
 
-  it("infra/base.yaml lists no per-app variable and names no app", () => {
+  it("infra/base.yaml lists no per-app variable, names no app and holds no account id", () => {
     const base = read("infra/base.yaml");
     expect(base).not.toMatch(/name: HYDE_APP_/);
+    expect(base).not.toMatch(/organizationId|projectId|registryEndpoint|namespace-id|image:/);
     for (const app of appNames(registry)) expect(base).not.toMatch(new RegExp(`name: ${app.toUpperCase()}_`));
     expect(config.variables.filter((v) => v.app)).toEqual(appVariableSpecs(registry));
   });
@@ -65,7 +67,24 @@ describe("committed infra/", () => {
   });
 
   it("refuses an environment without an overlay", () => {
-    expect(() => loadConfig("staging")).toThrow(/No infrastructure overlay/);
+    expect(() => loadExampleConfig("staging")).toThrow(/No infrastructure overlay/);
+  });
+
+  it("points at the examples when an operator file is missing", () => {
+    const missing = (p: string) => {
+      if (p.endsWith("apps.json") || p.endsWith(path.join("environments", "production.yaml"))) throw new Error("ENOENT");
+      return fs.readFileSync(p, "utf8");
+    };
+    expect(() => loadConfig("production", { repoRoot: root, readFileSync: missing }))
+      .toThrow(/copy infra\/environments\/production\.example\.yaml to production\.yaml/);
+    const noRegistry = (p: string) => (p.endsWith("apps.json") ? missing(p) : exampleReader()(p));
+    expect(() => loadConfig("production", { repoRoot: root, readFileSync: noRegistry }))
+      .toThrow(/copy apps\.example\.json to apps\.json/);
+  });
+
+  it("refuses an overlay without the account's ids", () => {
+    expect(() => loadExampleConfig("production", { "infra/environments/production.yaml": "container:\n  name: x\n" }))
+      .toThrow(/organizationId, projectId, registryEndpoint, container\.namespace-id, container\.image must be set in infra\/environments\/production\.yaml/);
   });
 });
 
@@ -73,7 +92,7 @@ describe("Dockerfile", () => {
   const dockerfile = read("Dockerfile");
 
   it("listens on the port infra/ declares and runs the server", () => {
-    expect(dockerfile).toContain(`ENV PORT=${loadConfig("production").container.port}`);
+    expect(dockerfile).toContain(`ENV PORT=${loadExampleConfig("production").container.port}`);
     expect(dockerfile).toContain('CMD ["node", "src/mcp/main.ts"]');
     expect(dockerfile).toMatch(/pnpm install --frozen-lockfile --prod/);
   });
@@ -90,7 +109,7 @@ describe("Dockerfile", () => {
     const end = lines.findIndex((l, i) => i >= start && !l.endsWith("\\"));
     return lines.slice(start, end + 1).join("\n").replace(/^RUN /, "").replaceAll("\\\n", "\n");
   })();
-  const build = (files: string[], registry: string | null = read("apps.json")) => {
+  const build = (files: string[], registry: string | null = read("apps.example.json")) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hyde-docker-"));
     if (registry !== null) fs.writeFileSync(path.join(dir, "apps.json"), registry);
     fs.mkdirSync(path.join(dir, "schemas"));
@@ -112,9 +131,9 @@ describe("Dockerfile", () => {
 
   it("takes the apps from apps.json", () => {
     const third = JSON.stringify({ apps: { "help-desk": {} } });
-    const helpdesk = build(["help-desk.hyde-json.json", "help-desk.redacted-schema.md"], third);
-    expect(helpdesk.status).toBe(0);
-    expect(helpdesk.out).toMatch(/apps with schemas: help-desk\n/);
+    const helpDesk = build(["help-desk.hyde-json.json", "help-desk.redacted-schema.md"], third);
+    expect(helpDesk.status).toBe(0);
+    expect(helpDesk.out).toMatch(/apps with schemas: help-desk\n/);
     // shop's pair is no use when apps.json does not register shop.
     expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], third).status).not.toBe(0);
     expect(build(["shop.hyde-json.json", "shop.redacted-schema.md"], null).out).toMatch(/apps\.json is missing/);
@@ -134,14 +153,15 @@ describe("Dockerfile", () => {
 });
 
 describe("secrets stay out of the repository", () => {
-  it("apply.env is gitignored", () => {
-    expect(read(".gitignore").split("\n")).toContain("apply.env");
+  it("the operator files are gitignored, their examples are not", () => {
+    const ignored = read(".gitignore").split("\n");
+    expect(ignored).toEqual(expect.arrayContaining(["apply.env", "apps.json", "infra/environments/*.yaml", "!infra/environments/*.example.yaml"]));
   });
 
-  it("the deploy workflow reads no runtime secret: only the scw key pair and the app-repo read token", () => {
+  it("the deploy workflow reads no runtime secret: only the scw key pair, the operator files and the app-repo read token", () => {
     const workflow = read(".github/workflows/deploy.yml");
     const secrets = [...workflow.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]);
-    expect([...new Set(secrets)].sort()).toEqual(["APP_REPOS_READ_TOKEN", "SCW_ACCESS_KEY", "SCW_SECRET_KEY"]);
+    expect([...new Set(secrets)].sort()).toEqual(["APP_REPOS_READ_TOKEN", "HYDE_APPS_JSON", "HYDE_PRODUCTION_YAML", "SCW_ACCESS_KEY", "SCW_SECRET_KEY"]);
     expect(workflow).toContain("apply production --keep-secrets");
     expect(workflow).toContain("diff production --strict");
   });

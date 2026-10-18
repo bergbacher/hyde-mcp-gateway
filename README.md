@@ -1,6 +1,18 @@
 # hyde-mcp-gateway
 
-Agents read the production logs and databases of your organisation's apps without seeing personal data. The database side is hyde-db; the log side applies the same principle, a declared field allowlist per app, inside this server. The apps are configuration: [`apps.json`](apps.json) registers them (LEDGER D38), today shop and crm. Product records: [`LEDGER.md`](LEDGER.md).
+An MCP server through which AI agents read the production logs and databases of your organisation's apps without seeing personal data. The database side is hyde-db, which limits a reader to annotated columns by database privileges; the log side applies the same principle, a declared field allowlist per app (`hyde-json`), inside this server. The apps are configuration: `apps.json` registers them (LEDGER D38); [`apps.example.json`](apps.example.json) registers two example apps, `shop` and `crm`, which the examples below use. It runs on Scaleway (Serverless Containers, Cockpit Loki, managed MySQL). Product records: [`LEDGER.md`](LEDGER.md).
+
+## Operator files
+
+Three files configure one deployment. They name your apps, your Scaleway account and your secrets, so they are local, gitignored and never committed; back them up outside git (a password manager or an encrypted store):
+
+| File | Holds | Start from |
+| --- | --- | --- |
+| `apps.json` | The app registry: per app its repo, schema paths, Loki stream selectors, database endpoint, certificate name and CA source ([Adding an app](#adding-an-app)). No secret. | `cp apps.example.json apps.json` |
+| `infra/environments/production.yaml` | Your Scaleway organisation and project ids, registry endpoint, and the container's name, namespace and image ([Deploy](#deploy)). No secret. | `cp infra/environments/production.example.yaml infra/environments/production.yaml` |
+| `apply.env` | Every runtime secret and value of the container ([apply.env](#applyenv)). | written by hand and by the reader wizard |
+
+The server, the fetch scripts, the wizard, `infra/` and the `Dockerfile` read `apps.json` and stop with a message pointing at the example when it is missing; `infra/` does the same for `production.yaml`. The deploy workflow cannot see local files: it writes `apps.json` and `production.yaml` from the repository secrets `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` and masks every value in them ([Deploy workflow](#deploy-workflow)). The tests read only the committed examples.
 
 ## Run locally
 
@@ -29,7 +41,7 @@ Client setup, issuing and rotating client tokens, and a first analysis: [`docs/r
 
 An app is one `apps.json` entry, its secrets in `apply.env`, and a re-apply. No code changes (LEDGER D38).
 
-1. **Registry entry.** Add the app under `apps` in [`apps.json`](apps.json). The name matches `^[a-z][a-z0-9-]*$` and is not `edge` (reserved for the edge schema); upper-cased with `-` → `_` it is the infix of the app's variables (`help-desk` → `HYDE_APP_HELP_DESK_`). Every field but `edge` is required, and the server, the scripts and `infra/` refuse an invalid file naming each problem:
+1. **Registry entry.** Add the app under `apps` in `apps.json`, then update the repository secret `HYDE_APPS_JSON` with the file. The name matches `^[a-z][a-z0-9-]*$` and is not `edge` (reserved for the edge schema); upper-cased with `-` → `_` it is the infix of the app's variables (`help-desk` → `HYDE_APP_HELP_DESK_`). Every field but `edge` is required, and the server, the scripts and `infra/` refuse an invalid file naming each problem:
 
    | Field | Holds |
    | --- | --- |
@@ -91,7 +103,7 @@ The server builds the LogQL; clients pass only parameters, so neither the token'
 {resource_name="example-crm-prod"} | json | line_format "{{.message}}" | json | service="crm" | level="error" | action="send-mail"
 ```
 
-The stream selector and `service` value are the app's `loki` entry in `apps.json`. Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the first `| json` opens the envelope, `line_format` makes the app line the log line, and the second `| json` extracts its fields (crm docs/operations.md). `service` is what each app's `log()` writes (`crm`, `shop`), so a broad stream selector still returns only that app's lines. `matched` comes from `sum(count_over_time(<query> [<hours>]))`.
+The stream selector and `service` value are the app's `loki` entry in `apps.json`. Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the first `| json` opens the envelope, `line_format` makes the app line the log line, and the second `| json` extracts its fields. `service` is what each app's `log()` writes (`crm`, `shop` in the example), so a broad stream selector still returns only that app's lines. `matched` comes from `sum(count_over_time(<query> [<hours>]))`.
 
 Every line Loki returns goes through `redactLine` with the app's schema before it leaves the server. `action` and `level` are read from the redacted line, so an app's schema must declare them `visible`; `payload` is the redacted `message` field (or the scrubbed text of a line that is not JSON). Loki's stream labels, which hold raw extracted values, are never read. When Loki is unreachable or answers non-2xx, the tool error names Loki and the status, nothing else.
 
@@ -138,7 +150,7 @@ redactLine(raw, schema); // → { envelope?, format: "json" | "text", line }
 
 ## Log field schemas
 
-Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, today `prisma/hyde-json.json` next to the Prisma schema of crm and shop (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
+Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, for example `prisma/hyde-json.json` next to the app's Prisma schema (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
 
 `schemas/` is gitignored except its README and `edge.hyde-json.json` ([Edge access logs](#edge-access-logs)): the app repos own the other files. At startup, `loadSchemas(registry)` in [`src/schemas.ts`](src/schemas.ts) reads those present for the registered apps, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
 
@@ -177,14 +189,14 @@ The server reads each app's database as `redacted_reader`, which can read only h
 
 ## Deploy
 
-The server runs as the Scaleway Serverless Container `hyde-mcp-gateway` in the apps' Scaleway project, region `fr-par`, namespace `example-namespace` (D15). `infra/base.yaml` and `infra/environments/production.yaml` declare it; `scripts/infra/apply.ts` reconciles it. Both are copied from crm's `infra/` and trimmed to the container kind.
+The server runs as a Scaleway Serverless Container, `hyde-mcp-gateway` by default, in the apps' project and container namespace, region `fr-par` (D15). `infra/base.yaml` (committed: shape, probes, variables) and `infra/environments/production.yaml` (your operator file: ids, registry, namespace, name, image) declare it; `scripts/infra/apply.ts` reconciles it.
 
 ```sh
 pnpm infra:diff     # read the container back; fails on any drift or if it is absent
 pnpm infra:apply    # write it, values from apply.env
 ```
 
-Every run first checks that the `scw` credential in scope reads the committed namespace as organisation and project `<organisation id>` and refuses otherwise. The organisation-level `SCW_*` secrets belong to a different Scaleway organisation and authenticate fine.
+Every run first checks that the `scw` credential in scope reads the configured namespace as the organisation and project `production.yaml` names, and refuses otherwise: organisation-level `SCW_*` secrets of a different Scaleway organisation authenticate fine.
 
 ### apply.env
 
@@ -198,8 +210,8 @@ The global keys are listed in `infra/base.yaml`. Each app's two keys are derived
 | `COCKPIT_LOGS_READ_TOKEN` | secret | Cockpit token, scope `read_only_logs` (D20) |
 | `HYDE_TOKEN_CLAUDE_CODE` | secret | Claude Code's bearer token, `openssl rand -hex 32` |
 | `HYDE_TOKEN_CLAUDE_CODE_APPS` | plain | The apps Claude Code may read: comma-separated `apps.json` names, or `*` (D39) |
-| `HYDE_TOKEN_AGENT` | secret | the agent runner's bearer token, `openssl rand -hex 32` |
-| `HYDE_TOKEN_AGENT_APPS` | plain | The apps agent may read, same form |
+| `HYDE_TOKEN_AGENT` | secret | The agent runner's bearer token (D5), `openssl rand -hex 32` |
+| `HYDE_TOKEN_AGENT_APPS` | plain | The apps the agent runner may read, same form |
 | `HYDE_APP_SHOP_REDACTED_URL` | secret, per app | shop's redacted reader, `mysql://<user>:<password>@<host>:<port>/redacted?ssl=true` (hyde-db) |
 | `HYDE_APP_SHOP_DATABASE_CA` | secret, per app | shop's RDB instance CA, PEM text |
 | `HYDE_APP_CRM_REDACTED_URL` | secret, per app | crm's redacted reader, same form |
@@ -219,16 +231,17 @@ Secret values land in `secret-environment-variables`, which `scw` returns only a
 
 ### Deploy workflow
 
-`.github/workflows/deploy.yml` runs on every push to `main`: fetch `schemas/` (`pnpm schemas`, `pnpm fetch:redacted-schemas`), verify the credential's target, build `Dockerfile`, push `rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
+`.github/workflows/deploy.yml` runs on every push to `main`: fetch `schemas/` (`pnpm schemas`, `pnpm fetch:redacted-schemas`), verify the credential's target, build `Dockerfile`, push `<registryEndpoint>/hyde-mcp-gateway:<sha>`, `apply production --keep-secrets`, `diff production --strict`, then check over HTTPS that `/health` answers 200 and `/mcp` without a token answers 401. `--keep-secrets` sends no runtime variable, secret or plain, so the container keeps the values set from `apply.env`, and it refuses to create the container. It runs only while the repository variable `HYDE_DEPLOY_ENABLED` is `true`.
 
 A manual run with `build_only` (`gh workflow run deploy.yml -f build_only=true`) runs whatever that variable says, and only fetches `schemas/`, verifies the credential's target, builds and pushes `<sha>` and `manual-<sha>` (it never moves `latest`). It runs no apply, diff or smoke check and writes the command for the local apply, `HYDE_IMAGE_TAG=<sha> pnpm infra:apply`, to the job summary (D44).
 
-The workflow reads three repository secrets, none of them a runtime value of the server:
+The workflow reads five repository secrets, none of them a runtime value of the server:
 
 | Secret | Used for |
 | --- | --- |
 | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | The deploy IAM application's key: registry push, `apply`, `diff` |
-| `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `example-org/crm` and `example-org/shop` for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on both; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
+| `HYDE_APPS_JSON`, `HYDE_PRODUCTION_YAML` | The operator files `apps.json` and `infra/environments/production.yaml`, verbatim ([Operator files](#operator-files)). The first step writes them and masks every value they hold in the log |
+| `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `apps.json` registers, for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on each; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
 
 `schemas/` is gitignored but its README and the edge schema. The `Dockerfile` copies it with the rest of the tree, warns for every app missing `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md`, and stops the build when no app has both (D37).
 
@@ -236,19 +249,19 @@ The workflow reads three repository secrets, none of them a runtime value of the
 
 Gather first (a human, once):
 
-- **Each app's instance CA**, from the file its `apps.json` entry names under `database.caSource` (crm's on crm's `production` branch for now). `scripts/wizard/fetch-redacted-sql.sh` writes it as `.redacted-sql/<app>/ca.pem`; `scw rdb instance get-certificate <instance-id> region=fr-par` reads it too. It goes into `HYDE_APP_<NAME>_DATABASE_CA`. The certificate names are already in `apps.json`.
+- **Each app's instance CA**, from the file its `apps.json` entry names under `database.caSource` (on another branch than `main` if the app has not merged it yet). `scripts/wizard/fetch-redacted-sql.sh` writes it as `.redacted-sql/<app>/ca.pem`; `scw rdb instance get-certificate <instance-id> region=fr-par` reads it too. It goes into `HYDE_APP_<NAME>_DATABASE_CA`. The certificate names are already in `apps.json`.
 - **The Loki URL**, into `COCKPIT_LOGS_URL`:
   ```sh
-  scw cockpit data-source get <data-source-id> region=fr-par -o json | jq -r .url
+  scw cockpit data-source list region=fr-par -o json | jq -r '.[] | select(.type == "logs") | .url'
   ```
-- **The app-repo read token**: a fine-grained PAT or GitHub App token with Contents: read on `example-org/crm` and `example-org/shop`.
+- **The app-repo read token**: a fine-grained PAT or GitHub App token with Contents: read on every app repo `apps.json` registers.
 
 Then:
 
 1. In the apps' Scaleway organisation, create an IAM application `hyde-mcp-gateway-deploy` with a policy granting `ContainersFullAccess` and `ContainerRegistryFullAccess`, and one API key for it.
 2. Set that key as repository secrets `SCW_ACCESS_KEY` and `SCW_SECRET_KEY`. Repository secrets override the organisation-level pair; without them the workflow fails at the organisation check.
-3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`. Without it the workflow fails at the schema fetch.
-4. Write `apply.env` with every required key above and both keys of each app to configure.
+3. Set the app-repo read token as repository secret `APP_REPOS_READ_TOKEN`, and the contents of `apps.json` and `infra/environments/production.yaml` as `HYDE_APPS_JSON` and `HYDE_PRODUCTION_YAML` (`gh secret set HYDE_APPS_JSON < apps.json`). Without them the workflow fails at the first step or the schema fetch.
+4. Write `apps.json` and `infra/environments/production.yaml` from their examples ([Operator files](#operator-files)), and `apply.env` with every required key above and both keys of each app to configure.
 5. Push the first image. No Docker needed on your machine: run the workflow in build-only mode on `main` and wait for it to finish:
    ```sh
    gh workflow run deploy.yml --ref main -f build_only=true
@@ -266,8 +279,9 @@ Then:
    pnpm fetch:redacted-schemas   # schemas/<app>.redacted-schema.md
    tag=$(git rev-parse HEAD)
    echo "$SCW_SECRET_KEY" | docker login rg.fr-par.scw.cloud -u nologin --password-stdin
-   docker build --platform linux/amd64 -t rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:$tag .
-   docker push rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway:$tag
+   image=$(node scripts/infra/apply.ts target production | sed -n 's/^image=//p')
+   docker build --platform linux/amd64 -t "$image:$tag" .
+   docker push "$image:$tag"
    HYDE_IMAGE_TAG=$tag pnpm infra:apply      # prints containerId= and endpoint=
    pnpm infra:diff
    ```

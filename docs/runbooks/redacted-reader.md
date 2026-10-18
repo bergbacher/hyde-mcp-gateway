@@ -17,7 +17,7 @@ Both scripts read the apps from `apps.json` (LEDGER D38) and take `--app <name>`
 - MySQL's command-line client 8.x (`brew install mysql-client`), not MariaDB's: the wizard uses `--ssl-mode`.
 - `gh`, logged in with read access to the selected apps' repos (each entry's `repo` and `database.caSource.repo`), and `openssl`.
 
-Each app's host, port and source database are its `database` entry in [`apps.json`](../../apps.json). The wizard offers them as defaults. Use the host name, never the IP: TLS verification needs the name. The wizard refuses an address.
+Each app's host, port and source database are its `database` entry in `apps.json` (your operator file; [`apps.example.json`](../../apps.example.json) shows the shape). The wizard offers them as defaults. Use the host name, never the IP: TLS verification needs the name. The wizard refuses an address.
 
 ## First run
 
@@ -33,7 +33,7 @@ Each app's host, port and source database are its `database` entry in [`apps.jso
    bash scripts/wizard/fetch-redacted-sql.sh --app shop
    ```
 
-   The CA always comes from the entry's `database.caSource`, ref included. crm's `lib/database-ca.ts` reaches `main` only with its Scaleway migration, so its entry names `production` until then; change the ref in `apps.json` once it is merged. `--ref` applies to the hyde-db scripts only: before the annotation PRs are merged, `--ref feat/hyde-db-annotations` fetches them from their branch. `--dry-run` prints what would be fetched.
+   The CA always comes from the entry's `database.caSource`, ref included, so an app whose CA file is not on `main` yet names the branch that carries it (the example's `crm` names `production`); change the ref in `apps.json` once it is merged. `--ref` applies to the hyde-db scripts only: before an app's annotation PR is merged, `--ref <branch>` fetches them from that branch. `--dry-run` prints what would be fetched.
 
 2. Optional: read what will run.
 
@@ -79,7 +79,7 @@ The views name columns. A migration that drops or changes one would break a view
 
 Between steps 1 and 3 the reader can read nothing, and hyde-mcp-gateway's database tools fail for that app.
 
-**Each app's migration runbook must gain this step.** crm and shop document their migrations themselves, and each must name drop → migrate → apply. That edit is made later, in the app repos, not here. Until it is, re-run the wizard after every deploy that carries a migration. The last acceptance criterion of #8 stays open until both app runbooks name the step.
+**Each app's migration runbook must gain this step.** The apps document their migrations themselves, and each must name drop → migrate → apply. That edit is made in the app repos, not here. Until it is, re-run the wizard after every deploy that carries a migration.
 
 ## Rotate the reader password
 
@@ -94,7 +94,7 @@ If the wizard stops between the password stage and the write, the new password i
 | Symptom | Cause and fix |
 |---|---|
 | `SSL connection error` or a certificate error at the first connect | The `ca.pem` does not match the instance. Check the app's `database.caSource` in `apps.json` and fetch again (see First run). As a last resort, `MYSQL_SSL_MODE=REQUIRED` keeps the connection encrypted but skips verifying the server. Say so when you report back. |
-| `hyde-db: … Fix: …` during apply or drop | Paste the printed fix as the admin, then run the wizard again. All refusals are listed in hyde-db, "What the MySQL apply script refuses". |
+| `hyde-db: … Fix: …` during apply or drop | Paste the printed fix as the admin, then run the wizard again. All refusals are listed in hyde-db's README, "What the MySQL apply script refuses". |
 | `ALTER USER failed` | `redacted_reader` does not exist yet. Run the drop-and-apply stage first. |
 | Reader login fails with 1045 | The password in `apply.env` is not the one set. This happens when the password stage was skipped on a first run. Run the wizard again and answer yes at the password stage. |
 | The table is not refused with 1142 | The reader has grants beyond the views. Run the wizard again: every apply first revokes all of the reader's privileges. |

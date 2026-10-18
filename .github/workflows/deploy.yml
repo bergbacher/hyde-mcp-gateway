@@ -1,6 +1,5 @@
-# Deploy: build, push, apply, read back. Adapted from crm's deploy.yml,
-# without its migrate job, Slack report or environment resolution: one
-# container, one environment, one job.
+# Deploy: build, push, apply, read back. One container, one environment, one
+# job.
 #
 # Order: fetch schemas/ from the app repos, verify the credential's target,
 # build and push the image tagged with the commit, `apply production
@@ -21,10 +20,13 @@
 # since this workflow may not create the container (D28).
 #
 # Secrets read: SCW_ACCESS_KEY, SCW_SECRET_KEY, as repository secrets. They
-# override the organisation-level pair of the same name, which
-# belongs to another Scaleway organisation; scripts/infra/organisation.ts
-# refuses that pair. Organisation, project, region, registry and image come
-# from infra/, never from a secret. APP_REPOS_READ_TOKEN (build time only):
+# override an organisation-level pair of the same name, which may belong to
+# another Scaleway organisation; scripts/infra/organisation.ts refuses such a
+# pair. HYDE_APPS_JSON and HYDE_PRODUCTION_YAML: the operator files apps.json
+# and infra/environments/production.yaml (README, Operator files), which hold
+# no secret but name your apps and Scaleway account, so they are kept out of
+# the repository and out of the logs. Organisation, project, region, registry
+# and image come from them and infra/. APP_REPOS_READ_TOKEN (build time only):
 # read access to the private app repos for the schema fetch, see that step.
 # No runtime value of the server is read here.
 
@@ -70,12 +72,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The operator files are not committed. Every string in them is masked
+      # before any step can print it (hosts, ids, the registry path).
+      - name: Write the operator files
+        env:
+          HYDE_APPS_JSON: ${{ secrets.HYDE_APPS_JSON }}
+          HYDE_PRODUCTION_YAML: ${{ secrets.HYDE_PRODUCTION_YAML }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HYDE_APPS_JSON" ] || [ -z "$HYDE_PRODUCTION_YAML" ]; then
+            echo "::error::Repository secrets HYDE_APPS_JSON and HYDE_PRODUCTION_YAML must hold apps.json and infra/environments/production.yaml (README, Operator files)"
+            exit 1
+          fi
+          printf '%s\n' "$HYDE_APPS_JSON" > apps.json
+          printf '%s\n' "$HYDE_PRODUCTION_YAML" > infra/environments/production.yaml
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { parse } from "yaml";
+            const leaves = (v) => v !== null && typeof v === "object" ? Object.values(v).flatMap(leaves) : [String(v)];
+            const values = [...leaves(JSON.parse(readFileSync("apps.json", "utf8"))), ...leaves(parse(readFileSync("infra/environments/production.yaml", "utf8")))];
+            for (const v of new Set(values)) if (v.length >= 6) console.log(`::add-mask::${v}`);
+          '
+
       # schemas/ is not committed: the app repos own the files. Both scripts
       # read the main of every repo apps.json registers through the GitHub
       # API, and the repos are private, which the workflow's own token cannot
       # read. APP_REPOS_READ_TOKEN is a fine-grained PAT or GitHub App token
-      # with Contents: read on each of them (today example-org/crm and
-      # example-org/shop). Both scripts read
+      # with Contents: read on each of them. Both scripts read
       # GITHUB_TOKEN, else GH_TOKEN. Each writes every app whose file fetches
       # and validates and warns for the others (D37); it fails only when it
       # wrote nothing. The Dockerfile then refuses an image in which no app has
@@ -154,8 +177,11 @@ jobs:
           HYDE_IMAGE_TAG: ${{ github.sha }}
         run: |
           set -euo pipefail
-          node scripts/infra/apply.ts apply production --keep-secrets | tee "$RUNNER_TEMP/apply.log"
-          grep '^endpoint=' "$RUNNER_TEMP/apply.log" >> "$GITHUB_OUTPUT"
+          node scripts/infra/apply.ts apply production --keep-secrets > "$RUNNER_TEMP/apply.log"
+          endpoint=$(sed -n 's/^endpoint=//p' "$RUNNER_TEMP/apply.log")
+          echo "::add-mask::${endpoint#https://}"
+          cat "$RUNNER_TEMP/apply.log"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
 
       - name: Read the container back
         if: ${{ !inputs.build_only }}

@@ -1,48 +1,22 @@
-# hyde-mcp-gateway's Scaleway Serverless Container (D15), in the apps' Scaleway organisation next to
-# the apps it reads.
+# hyde-mcp-gateway's Scaleway Serverless Container (D15), next to the apps it
+# reads.
 #
 # Read by scripts/infra/config.ts and reconciled by scripts/infra/apply.ts
-# (`diff` / `apply` / `verify-organisation`). Copied from crm's
-# infra/base.yaml and trimmed to the one kind this server needs: no jobs, cron
-# triggers, Cockpit retention or alert rules.
+# (`diff` / `apply` / `verify-organisation`). Trimmed to the one kind this
+# server needs: no jobs, cron triggers, Cockpit retention or alert rules.
 #
 # Field names under `container` mirror the `scw` CLI's dashed arg names 1:1, so
 # this file can be checked against `scw container container create --help`.
 #
-# Per-environment values (container.name, container.min-scale) live in
-# infra/environments/<env>.yaml and are deep-merged on top of this file.
+# Everything that names your Scaleway account lives in
+# infra/environments/<env>.yaml, an operator file that is gitignored
+# (infra/environments/production.example.yaml shows its shape): organisation
+# and project ids, the registry endpoint, and the container's name, namespace
+# and image. It is deep-merged on top of this file.
 
 region: fr-par
 
-# the apps' Scaleway organisation. Every subcommand compares it against the
-# `organization_id` of `container.namespace-id`, read live, and refuses on a
-# mismatch: `SCW_ACCESS_KEY` / `SCW_SECRET_KEY` also exist as organisation-level
-# secrets for a different Scaleway organisation, and such a key
-# authenticates fine (scripts/infra/organisation.ts). Value from crm's
-# infra/base.yaml.
-organizationId: 00000000-0000-0000-0000-000000000000
-
-# The apps' project: `default`, whose id equals the organisation's (crm
-# cutover notes, read live there). Checked against the
-# namespace's `project_id` with the organisation; the workflow derives
-# SCW_DEFAULT_PROJECT_ID from it, so it is never a secret.
-projectId: 00000000-0000-0000-0000-000000000000
-
-# the apps' Scaleway organisation's registry namespace, shared with shop and crm.
-registryEndpoint: rg.fr-par.scw.cloud/example-namespace
-
 container:
-  # `name` and `min-scale` are per environment. The namespace already holds
-  # shop-prod and crm-prod; a name is the only thing between `apply` and
-  # another application's container.
-
-  # The `example-namespace` container namespace (crm infra/base.yaml). Also
-  # the resource the organisation check reads.
-  namespace-id: 00000000-0000-0000-0000-000000000000
-  # `<registryEndpoint>/hyde-mcp-gateway`. Untagged: the tag is a deploy-time input
-  # (HYDE_IMAGE_TAG).
-  image: rg.fr-par.scw.cloud/example-namespace/hyde-mcp-gateway
-
   # Two clients, stateless requests (src/mcp/http.ts): one instance carries
   # the load; the second is headroom.
   max-scale: 2
