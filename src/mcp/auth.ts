@@ -1,7 +1,8 @@
 // Who is calling and which apps they may read (D16, D39). Token verification
 // sits behind `TokenVerifier`, so a stored-token or OAuth implementation can
 // replace the static one without touching the tools; the tools see only the
-// `Principal`. Today's implementation is `StaticTokenVerifier`: one
+// `Principal`. Two implementations: GitHub tokens (src/mcp/github-auth.ts,
+// D59), scoped by the repositories they can read, and `StaticTokenVerifier`: one
 // `HYDE_TOKEN_<CLIENT>` per client, its app scope in
 // `HYDE_TOKEN_<CLIENT>_APPS` (a comma list of apps.json names, or `*`).
 // There is no implicit all-access: a token without its scope variable, a scope
@@ -18,8 +19,29 @@ export interface Principal {
 }
 
 export interface TokenVerifier {
-  /** The principal for an `Authorization` header, or undefined when it carries no accepted token. */
+  /**
+   * The principal for an `Authorization` header, or undefined when it carries
+   * no accepted token. Throws `VerificationUnavailableError` when the token
+   * cannot be checked right now (its issuer is down or rate-limits).
+   */
   verify(header: string | undefined): Promise<Principal | undefined>;
+}
+
+/** A token that could not be checked, as opposed to one that was refused. The message names the cause, never the token. */
+export class VerificationUnavailableError extends Error {}
+
+/** The prefixes GitHub gives its tokens: classic and fine-grained PATs, OAuth, user-to-server and installation tokens. */
+export const GITHUB_TOKEN_PREFIXES: readonly string[] = ["ghp_", "gho_", "ghu_", "ghs_", "github_pat_"];
+
+/** Whether `token` is shaped like a GitHub token, and so is checked against GitHub (D59). */
+export function isGitHubToken(token: string): boolean {
+  return GITHUB_TOKEN_PREFIXES.some((p) => token.startsWith(p));
+}
+
+/** The token of a `Bearer <token>` header, else undefined. */
+export function bearerToken(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  return /^Bearer\s+(\S+)$/i.exec(header)?.[1];
 }
 
 /** Whether `principal` may read `app`. Scope is per app, not per tool. */
@@ -55,6 +77,7 @@ export function readClientTokens(registry: Registry, env: NodeJS.ProcessEnv): Ma
       continue;
     }
     if (!value) continue;
+    if (isGitHubToken(value)) throw new Error(`${key} starts like a GitHub token; static tokens must not (openssl rand -hex 32)`);
     const client = key.slice(TOKEN_PREFIX.length).toLowerCase().replaceAll("_", "-");
     if (value.length < 32) throw new Error(`${key} is shorter than 32 characters`);
     if (tokens.has(value)) throw new Error(`${key} repeats another client's token`);
@@ -95,10 +118,9 @@ export class StaticTokenVerifier implements TokenVerifier {
   }
 
   async verify(header: string | undefined): Promise<Principal | undefined> {
-    if (!header) return undefined;
-    const match = /^Bearer\s+(\S+)$/i.exec(header);
-    if (!match) return undefined;
-    const given = Buffer.from(match[1]!);
+    const token = bearerToken(header);
+    if (!token) return undefined;
+    const given = Buffer.from(token);
     // Every token is compared, so the time taken does not say which one matched.
     let found: Principal | undefined;
     for (const [token, principal] of this.#tokens) {
@@ -106,5 +128,26 @@ export class StaticTokenVerifier implements TokenVerifier {
       if (known.length === given.length && timingSafeEqual(known, given)) found = principal;
     }
     return found;
+  }
+}
+
+/**
+ * Routes a GitHub-shaped token to the GitHub verifier and every other token to
+ * the static one; a token is checked by exactly one of them.
+ */
+export class CompositeVerifier implements TokenVerifier {
+  /** The verifier kinds, as the startup line lists them. */
+  readonly kinds = ["github", "static"] as const;
+  readonly #github: TokenVerifier;
+  readonly #fallback: TokenVerifier;
+
+  constructor(github: TokenVerifier, fallback: TokenVerifier) {
+    this.#github = github;
+    this.#fallback = fallback;
+  }
+
+  verify(header: string | undefined): Promise<Principal | undefined> {
+    const token = bearerToken(header);
+    return token && isGitHubToken(token) ? this.#github.verify(header) : this.#fallback.verify(header);
   }
 }

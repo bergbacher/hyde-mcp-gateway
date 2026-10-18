@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 import type { Databases } from "../src/db/pool.ts";
 import { createLoki } from "../src/loki.ts";
 import { toolNames, type ServerOptions } from "../src/mcp/server.ts";
-import { loadRedactedSchemas, loadSchemas } from "../src/schemas.ts";
+import { SchemaStore } from "../src/schema-store.ts";
+import { parseLogSchemaText, schemaFile } from "../src/schemas.ts";
 import { buildLogSources } from "../src/sources/index.ts";
 import { answering, connectInMemory, REGISTRY, textOf, untouchable } from "./helpers.ts";
 
@@ -14,14 +15,16 @@ describe("describe_schema", () => {
   it("returns the app's redacted schema loaded from schemas/", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hyde-schemas-"));
     writeFileSync(join(dir, "shop.redacted-schema.md"), "# shop redacted schema\n");
-    const schemas = loadRedactedSchemas(REGISTRY, dir);
+    const store = new SchemaStore({ registry: REGISTRY, dir, log: () => {}, warn: () => {} });
+    await store.refresh();
+    const schemas = store.redactedSchemas;
     expect(schemas).toEqual(new Map([["shop", "# shop redacted schema\n"]]));
 
     const client = await connectInMemory({ sql: { databases: untouchable, schemas } });
     expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop redacted schema\n");
     const missing = await client.callTool({ name: "describe_schema", arguments: { app: "crm" } });
     expect(missing.isError).toBe(true);
-    expect(textOf(missing)).toBe("crm is not configured: schemas/crm.redacted-schema.md is missing");
+    expect(textOf(missing)).toBe("crm is not configured: redacted schema is missing");
     await client.close();
   });
 });
@@ -47,11 +50,11 @@ describe("query_sql", () => {
       expect(textOf(crm)).toBe("crm is not configured: HYDE_APP_CRM_REDACTED_URL is not set");
       const shop = await call(name, "shop");
       expect(shop.isError).toBe(true);
-      expect(textOf(shop)).toBe("shop is not configured: schemas/shop.redacted-schema.md is missing");
+      expect(textOf(shop)).toBe("shop is not configured: redacted schema is missing");
     }
     const none = await connectInMemory({ sql: { databases: { ...untouchable, has: () => false }, schemas: new Map() } });
     const both = await none.callTool({ name: "query_sql", arguments: { app: "shop", sql: "UPDATE x SET y = 1" } });
-    expect(textOf(both)).toBe("shop is not configured: schemas/shop.redacted-schema.md is missing; HYDE_APP_SHOP_REDACTED_URL is not set");
+    expect(textOf(both)).toBe("shop is not configured: redacted schema is missing; HYDE_APP_SHOP_REDACTED_URL is not set");
     await none.close();
     await client.close();
   });
@@ -129,7 +132,12 @@ describe("registration", () => {
   const sql = { databases: untouchable, schemas: new Map() };
   const logs = {
     sources: buildLogSources({
-      registry: REGISTRY, schemas: loadSchemas(REGISTRY, fileURLToPath(new URL("./fixtures/schemas/", import.meta.url))), env: {},
+      registry: REGISTRY,
+      schemas: new Map((["shop", "crm"] as const).map((app) => [
+        app,
+        parseLogSchemaText(app, readFileSync(schemaFile(app, fileURLToPath(new URL("./fixtures/schemas/", import.meta.url))), "utf8")),
+      ])),
+      env: {},
     }),
     loki: createLoki({ url: "https://loki.invalid", token: "t", fetch: () => Promise.reject(new Error("reached Loki")) }),
   };

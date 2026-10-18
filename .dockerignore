@@ -6,3 +6,7 @@ apply.env
 .github
 .claude
 dist
+
+# App schemas are fetched at runtime (D58), never baked in: only the edge schema is ours (D46).
+schemas/*
+!schemas/edge.hyde-json.json
