@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSchemas, schemaFile } from "../src/schemas.ts";
+import { edgeSchemaFile, loadEdgeSchema, loadSchemas, schemaFile } from "../src/schemas.ts";
 import { REGISTRY } from "./helpers.ts";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/schemas/", import.meta.url));
@@ -56,5 +56,27 @@ describe("loadSchemas", () => {
     const dir = dirWith("crm");
     copyFileSync(schemaFile("crm", FIXTURES), schemaFile("shop", dir));
     expect(() => loadSchemas(REGISTRY, dir)).toThrow(/shop: .*"app" is "crm", expected "shop"/);
+  });
+});
+
+describe("loadEdgeSchema (D46)", () => {
+  it("loads the committed edge schema: client IP and Scaleway ids hidden, the URL text, the rest visible", () => {
+    const schema = loadEdgeSchema();
+    expect(schema.app).toBe("edge");
+    expect(schema.fields.http_request_client_ip).toBe("hidden");
+    expect(schema.fields.pipeline_id).toBe("hidden");
+    expect(schema.fields.project_id).toBe("hidden");
+    expect(schema.fields.http_client_request_url).toBe("text");
+    const others = Object.entries(schema.fields)
+      .filter(([path]) => !["http_request_client_ip", "pipeline_id", "project_id", "http_client_request_url"].includes(path));
+    for (const [path, rule] of others) expect([path, rule]).toEqual([path, "visible"]);
+    expect(schema.passIds || schema.passNumbers).toBe(false);
+  });
+
+  it("throws naming the file when it is missing or filed under another name", () => {
+    const dir = dirWith();
+    expect(() => loadEdgeSchema(dir)).toThrow(/edge\.hyde-json\.json not loaded/);
+    writeFileSync(edgeSchemaFile(dir), JSON.stringify({ app: "shop", fields: {} }));
+    expect(() => loadEdgeSchema(dir)).toThrow(/"app" is "shop", expected "edge"/);
   });
 });

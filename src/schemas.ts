@@ -3,6 +3,9 @@
 // - Log field schemas (D23), `<app>.hyde-json.json` via `pnpm schemas`.
 // - Redacted schemas (hyde-db), `<app>.redacted-schema.md` via
 //   `pnpm fetch:redacted-schemas`, served by `describe_schema`.
+// - The edge schema (D46), `edge.hyde-json.json`, is the one file here that is
+//   committed: hyde-mcp-gateway owns it, since no app writes Edge Services access
+//   logs. It must be present and valid, or the server does not start.
 // An app whose file is missing is left out, and its tools answer that it is
 // not configured (D37). The server refuses to start only when no log schema
 // exists or a present one is invalid.
@@ -24,6 +27,22 @@ export function schemaFile(app: App, dir: string = SCHEMA_DIR): string {
 
 export function redactedSchemaFile(app: App, dir: string = SCHEMA_DIR): string {
   return join(dir, `${app}.redacted-schema.md`);
+}
+
+export const EDGE_SCHEMA = "edge";
+
+export function edgeSchemaFile(dir: string = SCHEMA_DIR): string {
+  return join(dir, `${EDGE_SCHEMA}.hyde-json.json`);
+}
+
+/** Reads and validates the committed edge schema. Throws naming the file when it is missing or invalid. */
+export function loadEdgeSchema(dir: string = SCHEMA_DIR): LogSchema {
+  const file = edgeSchemaFile(dir);
+  try {
+    return parseAppSchema(EDGE_SCHEMA, JSON.parse(readFileSync(file, "utf8")));
+  } catch (e) {
+    throw new Error(`Edge log schema ${file} not loaded: ${(e as Error).message}`);
+  }
 }
 
 /** Validates one app's log schema; its `app` must name the app it is filed under. */

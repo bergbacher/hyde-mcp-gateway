@@ -29,7 +29,7 @@ Client setup, issuing and rotating client tokens, and a first analysis: [`docs/r
 
 An app is one `apps.json` entry, its secrets in `apply.env`, and a re-apply. No code changes (LEDGER D38).
 
-1. **Registry entry.** Add the app under `apps` in [`apps.json`](apps.json). The name matches `^[a-z][a-z0-9-]*$`; upper-cased with `-` → `_` it is the infix of the app's variables (`help-desk` → `HYDE_APP_HELP_DESK_`). Every field is required, and the server, the scripts and `infra/` refuse an invalid file naming each problem:
+1. **Registry entry.** Add the app under `apps` in [`apps.json`](apps.json). The name matches `^[a-z][a-z0-9-]*$` and is not `edge` (reserved for the edge schema); upper-cased with `-` → `_` it is the infix of the app's variables (`help-desk` → `HYDE_APP_HELP_DESK_`). Every field but `edge` is required, and the server, the scripts and `infra/` refuse an invalid file naming each problem:
 
    | Field | Holds |
    | --- | --- |
@@ -39,6 +39,7 @@ An app is one `apps.json` entry, its secrets in `apply.env`, and a re-apply. No 
    | `redactedSqlPath` | The directory holding hyde-db's `redacted-views.sql` and `redacted-views-drop.sql`. |
    | `loki.stream` | The LogQL stream selector of the app's container, `{resource_name="<container resource name>"}`. |
    | `loki.service` | The `service` field the app's `log()` writes. |
+   | `edge.stream` | Optional: the LogQL stream selector of the app's Scaleway Edge Services pipeline, `{resource_name="<pipeline name>"}` (shop: `{resource_name="shop-prod-es"}`). Without `edge`, `source: "edge"` on the log tools answers `<app> has no edge source` ([Edge access logs](#edge-access-logs)). |
    | `database.host`, `database.port` | The RDB endpoint's DNS name (not an address) and port. |
    | `database.sourceDatabase` | The database the hyde-db views read from. |
    | `database.certName` | The name the instance certificate carries, checked instead of the host (the bare instance id, or the endpoint host when the certificate names it). |
@@ -58,12 +59,12 @@ An app with only some of this answers the tools it is ready for and is refused a
 | Tool | Returns |
 | --- | --- |
 | `ping(app)` | `{app, client, apps, scope}`: proves auth and routing; `apps` lists the registered apps, `scope` the apps this client may read or `"*"`. |
-| `query_logs(app, hours=24, level?, action?, limit=100)` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. See [Log tools](#log-tools). |
-| `count_errors(app, hours=24)` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. |
+| `query_logs(app, hours=24, level?, action?, limit=100, source="app")` | `{matched, returned, lines: [{timestamp, action, level, payload}]}`, newest first. `hours` ≤ 168, `limit` ≤ 500, `level` is `"error"` or `"info"`. `source: "edge"` reads the app's Edge Services access log; `action` is then `<METHOD> <path>`. See [Log tools](#log-tools) and [Edge access logs](#edge-access-logs). |
+| `count_errors(app, hours=24, source="app")` | `{rows: [{action, count}], total, partial}`: error lines by action, most frequent first. Reads at most 5000 lines; `partial: true` says the counts stop there. With `source: "edge"` the rows are `{status, action, count}`: origin status and `<METHOD> <path>`. |
 | `describe_schema(app)` | The app's `redacted-schema.md` (hyde-db): the views and visible columns `query_sql` can read. Loaded at startup from `schemas/<app>.redacted-schema.md`. |
 | `query_sql(app, sql, limit?)` | `{columns, rows, truncated}` for one `SELECT` (or `WITH ... SELECT`) over the app's redacted views. See [SQL tools](#sql-tools). |
 
-`createServer(principal, options)` takes the caller (`{client, apps}`, from the `TokenVerifier`) and the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (log schemas, Loki client, each app's log source), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options)` verifies the token with `options.verifier` (default: the static tokens in `config`) and passes the rest of `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
+`createServer(principal, options)` takes the caller (`{client, apps}`, from the `TokenVerifier`) and the registry (`options.registry`, from `loadRegistry()` in [`src/registry.ts`](src/registry.ts)), always registers `ping`, the log tools when `options.logs` is given (log schemas, the edge schema, Loki client, each app's log source), and `describe_schema` and `query_sql` when `options.sql` is given (databases, redacted schemas). `createApp(config, options)` verifies the token with `options.verifier` (default: the static tokens in `config`) and passes the rest of `options` through, so the HTTP tests run with `ping` alone; [`src/mcp/main.ts`](src/mcp/main.ts) builds both.
 
 ## Environment
 
@@ -93,6 +94,20 @@ The server builds the LogQL; clients pass only parameters, so neither the token'
 The stream selector and `service` value are the app's `loki` entry in `apps.json`. Scaleway wraps each stdout line in `{resource_instance, message, stream}`: the first `| json` opens the envelope, `line_format` makes the app line the log line, and the second `| json` extracts its fields (crm docs/operations.md). `service` is what each app's `log()` writes (`crm`, `shop`), so a broad stream selector still returns only that app's lines. `matched` comes from `sum(count_over_time(<query> [<hours>]))`.
 
 Every line Loki returns goes through `redactLine` with the app's schema before it leaves the server. `action` and `level` are read from the redacted line, so an app's schema must declare them `visible`; `payload` is the redacted `message` field (or the scrubbed text of a line that is not JSON). Loki's stream labels, which hold raw extracted values, are never read. When Loki is unreachable or answers non-2xx, the tool error names Loki and the status, nothing else.
+
+### Edge access logs
+
+`source: "edge"` (D46) reads an app's Scaleway Edge Services access log from the stream its `apps.json` entry names under `edge.stream`. Edge lines are plain JSON records without the app envelope (`http_request_method`, `http_client_request_url`, `http_response_code_client`, `http_response_code_origin`, `http_client_country_code`, `waf_action`, `waf_mode`, …), so one `| json` extracts them. For `query_logs("shop", 24, level: "error", action: "GET /api/sync", source: "edge")`:
+
+```logql
+{resource_name="shop-prod-es"} | json | waf_action != "pass" or http_response_code_origin >= 500 | http_request_method="GET" | http_client_request_url=~"(https?://[^/?#]+)?/api/sync([?#].*)?" | __error__=""
+```
+
+- `level`: the lines' own `level` is always `info`, so `error` means the origin answered 5xx or the WAF did not pass the request; `info` is the rest. `__error__=""` drops a line whose origin status is not a number rather than failing the count.
+- `action`: an edge line has none, so the server derives `<METHOD> <path>` from the raw line: the URL path without query or fragment, scrubbed as free text so personal data in a path cannot get around the schema. The `action` filter takes the same form.
+- Redaction: every line goes through `redactLine` with [`schemas/edge.hyde-json.json`](schemas/edge.hyde-json.json), committed here because no app writes these lines: the client IP and Scaleway's `pipeline_id` and `project_id` are hidden, the URL is `text` (its query string becomes `?[query]`), every other field is visible. `payload` is the whole redacted line. The server does not start without the file.
+- `count_errors` groups by origin status and `<METHOD> <path>`.
+- An app without `edge` in `apps.json` answers `<app> has no edge source` at both tools, before Loki is asked. The app's own log schema is not needed for its edge source.
 
 ## SQL tools
 
@@ -125,7 +140,7 @@ redactLine(raw, schema); // → { envelope?, format: "json" | "text", line }
 
 Each app declares its log field schema in its own repo at the `logSchemaPath` its `apps.json` entry names, today `prisma/hyde-json.json` next to the Prisma schema of crm and shop (D23). `pnpm schemas` downloads them from the repos' `main` branch through the GitHub API into `schemas/<app>.hyde-json.json` and validates each with `parseSchema`. It writes every app whose schema fetches and validates and warns for each other app; it exits non-zero only when it wrote nothing, or with `--strict` when any requested app failed. `--app <app>` (repeatable) limits it to those apps. Auth is `GITHUB_TOKEN`, else `GH_TOKEN`, else the token of a logged-in `gh`. `pnpm fetch:redacted-schemas` works the same way for each entry's `redactedSchemaPath`.
 
-`schemas/` is gitignored except its README: the app repos own the files. At startup, `loadSchemas(registry)` in [`src/schemas.ts`](src/schemas.ts) reads those present for the registered apps, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
+`schemas/` is gitignored except its README and `edge.hyde-json.json` ([Edge access logs](#edge-access-logs)): the app repos own the other files. At startup, `loadSchemas(registry)` in [`src/schemas.ts`](src/schemas.ts) reads those present for the registered apps, checks that each file's `app` matches its name, and throws when one is invalid or none exists. An app left out is refused at the log tools ([Per-app readiness](#per-app-readiness)), so no line is ever returned unredacted. `createApp` does not need schemas: without its `logs` option it registers no log tools, so tests run without them; the log tests inject schemas and a Loki client with a fake `fetch`.
 
 A field an app starts logging without declaring it shows up as `[hidden]` until the app's schema declares it and `pnpm schemas` has run again.
 
@@ -215,7 +230,7 @@ The workflow reads three repository secrets, none of them a runtime value of the
 | `SCW_ACCESS_KEY`, `SCW_SECRET_KEY` | The deploy IAM application's key: registry push, `apply`, `diff` |
 | `APP_REPOS_READ_TOKEN` | Build time only: read `main` of the private app repos `example-org/crm` and `example-org/shop` for `schemas/`. A fine-grained PAT or GitHub App token with Contents: read on both; the workflow's own `GITHUB_TOKEN` cannot read other private repos. The step passes it as `GITHUB_TOKEN` (`pnpm schemas`) and `GH_TOKEN` (`gh`, used by `pnpm fetch:redacted-schemas`) |
 
-`schemas/` is gitignored but its README. The `Dockerfile` copies it with the rest of the tree, warns for every app missing `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md`, and stops the build when no app has both (D37).
+`schemas/` is gitignored but its README and the edge schema. The `Dockerfile` copies it with the rest of the tree, warns for every app missing `schemas/<app>.hyde-json.json` or `schemas/<app>.redacted-schema.md`, and stops the build when no app has both (D37).
 
 ### First deploy
 

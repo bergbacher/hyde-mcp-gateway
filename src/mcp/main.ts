@@ -2,7 +2,7 @@ import { readConfig, readLokiConfig } from "../config.ts";
 import { createDatabases } from "../db/pool.ts";
 import { createLoki } from "../loki.ts";
 import { appNames, loadRegistry } from "../registry.ts";
-import { loadRedactedSchemas, loadSchemas } from "../schemas.ts";
+import { loadEdgeSchema, loadRedactedSchemas, loadSchemas } from "../schemas.ts";
 import { scopeOf } from "./auth.ts";
 import { createApp } from "./http.ts";
 import { logsMissing } from "./logs.ts";
@@ -16,12 +16,19 @@ const lokiConfig = readLokiConfig(registry);
 // schema exists or a present one is invalid; an app without its schema is
 // refused at the log tools, since an absent schema would hide every field.
 const logSchemas = loadSchemas(registry);
+// The committed edge schema (D46); missing or invalid stops the start.
+const edgeSchema = loadEdgeSchema();
 // An app without its redacted-schema.md is refused at describe_schema and query_sql.
 const redactedSchemas = loadRedactedSchemas(registry);
 
 const options: ServerOptions = {
   registry,
-  logs: { schemas: logSchemas, loki: createLoki({ url: lokiConfig.url, token: lokiConfig.token }), sources: lokiConfig.sources },
+  logs: {
+    schemas: logSchemas,
+    edgeSchema,
+    loki: createLoki({ url: lokiConfig.url, token: lokiConfig.token }),
+    sources: lokiConfig.sources,
+  },
   sql: { databases: createDatabases(config.databases), schemas: redactedSchemas },
 };
 
@@ -48,6 +55,7 @@ createApp(config, options).listen(config.port, () => {
       redacted: [...redactedSchemas.keys()],
     },
     streams: Object.fromEntries([...lokiConfig.sources].map(([app, s]) => [app, s.stream])),
+    edgeStreams: Object.fromEntries([...lokiConfig.sources].flatMap(([app, s]) => (s.edgeStream ? [[app, s.edgeStream]] : []))),
   }));
   for (const { app, groups } of missing) {
     const lacks = [...groups.logs, ...groups.sql];

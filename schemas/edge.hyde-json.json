@@ -1,0 +1,24 @@
+{
+  "app": "edge",
+  "fields": {
+    "cache_hit_request": "visible",
+    "file": "visible",
+    "http_client_country_code": "visible",
+    "http_client_request_url": "text",
+    "http_client_version": "visible",
+    "http_request_client_ip": "hidden",
+    "http_request_datetime": "visible",
+    "http_request_method": "visible",
+    "http_request_ssl_version": "visible",
+    "http_response_code_client": "visible",
+    "http_response_code_origin": "visible",
+    "http_response_content_type": "visible",
+    "level": "visible",
+    "pipeline_id": "hidden",
+    "pipeline_name": "visible",
+    "project_id": "hidden",
+    "waf_action": "visible",
+    "waf_mode": "visible",
+    "waf_rule_id": "visible"
+  }
+}

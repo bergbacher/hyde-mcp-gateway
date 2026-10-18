@@ -183,7 +183,9 @@ describe("secrets stay out of the repository", () => {
     }
   });
 
-  it("schemas/ is gitignored but its README", () => {
-    expect(read(".gitignore").split("\n")).toEqual(expect.arrayContaining(["schemas/*", "!schemas/README.md"]));
+  it("schemas/ is gitignored but its README and the edge schema hyde-mcp-gateway owns (D46)", () => {
+    expect(read(".gitignore").split("\n")).toEqual(
+      expect.arrayContaining(["schemas/*", "!schemas/README.md", "!schemas/edge.hyde-json.json"]),
+    );
   });
 });

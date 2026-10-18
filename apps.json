@@ -9,6 +9,7 @@
         "stream": "{resource_name=\"example-shop-prod\"}",
         "service": "shop"
       },
+      "edge": { "stream": "{resource_name=\"shop-prod-es\"}" },
       "database": {
         "host": "rw-0000.example.invalid",
         "port": 3306,

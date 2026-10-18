@@ -16,7 +16,7 @@ RUN corepack enable
 # keeps node_modules, apply.env and .env* out of the context.
 #
 # The tree includes apps.json, the app registry the server reads at startup
-# (D38), and schemas/, which is not committed: `pnpm schemas` (log field
+# (D38), and schemas/, not committed but for edge.hyde-json.json (D46): `pnpm schemas` (log field
 # schemas) and `pnpm fetch:redacted-schemas` (redacted-schema.md) fill it from
 # the app repos' main before the build (deploy.yml; README, First deploy). The
 # server serves the registered apps whose files are present (D37); an app

@@ -50,10 +50,12 @@ function readDatabases(registry: Registry, env: NodeJS.ProcessEnv): Map<App, Dat
 // The apps share the data source (A10); an app's lines are selected by its
 // stream selector, then by the `service` field its log() writes.
 
-/** Where one app's lines are: its stream selector and its `service` value. */
+/** Where one app's lines are: its stream selector and its `service` value, and its edge stream when it has one (D46). */
 export interface LogSource {
   stream: string;
   service: string;
+  /** The stream selector of the app's Edge Services access logs; absent when the registry declares no `edge`. */
+  edgeStream?: string;
 }
 
 export interface LokiConfig {
@@ -66,7 +68,11 @@ export interface LokiConfig {
 
 /** The registry's stream and service per app, without overrides. */
 export function logSources(registry: Registry): Map<App, LogSource> {
-  return new Map([...registry.apps.values()].map((e) => [e.name, { stream: e.loki.stream, service: e.loki.service }]));
+  return new Map([...registry.apps.values()].map((e) => [e.name, {
+    stream: e.loki.stream,
+    service: e.loki.service,
+    ...(e.edge ? { edgeStream: e.edge.stream } : {}),
+  }]));
 }
 
 /** Reads `COCKPIT_LOGS_URL`, `COCKPIT_LOGS_READ_TOKEN` and each app's `LOKI_STREAM` override. Throws naming each problem. */

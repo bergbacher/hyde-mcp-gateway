@@ -5,14 +5,23 @@
 // schema before it leaves the server; Loki's stream labels, which hold raw
 // extracted values, are never read. An app without a log schema is refused
 // before Loki is asked (D37).
+//
+// `source: "edge"` reads the app's Scaleway Edge Services access logs instead
+// (D46): plain JSON lines without the app envelope, redacted by hyde-mcp-gateway's
+// committed edge schema. They have no `action` and their `level` is always
+// info, so both are derived server side from the raw line: `action` is
+// `<method> <path>` (the URL path without query or fragment, scrubbed as free
+// text), and a line is an error when the origin answered 5xx or the WAF did
+// not pass it. An app without an `edge` entry is refused before Loki is asked.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { redactLine, type Json, type LogSchema } from "hyde-json";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { redactLine, scrubText, type Json, type LogSchema } from "hyde-json";
 import { z } from "zod";
 import type { LogSource } from "../config.ts";
 import { LokiError, nsOf, type Loki, type LokiEntry } from "../loki.ts";
 import type { App } from "../registry.ts";
-import type { Schemas } from "../schemas.ts";
+import { EDGE_SCHEMA, type Schemas } from "../schemas.ts";
 import { appSchema, error, forApp, notConfigured, text, type Gate } from "./server.ts";
 
 export const MAX_HOURS = 168;
@@ -20,9 +29,19 @@ export const MAX_LIMIT = 500;
 /** Error lines count_errors reads at most; Loki's default `max_entries_limit_per_query`. */
 export const ERROR_SCAN_LIMIT = 5000;
 
+export const SOURCES = ["app", "edge"] as const;
+export type Source = (typeof SOURCES)[number];
+
+/** An app line's `action` filter. */
+export const APP_ACTION = /^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/;
+/** An edge line's `action` filter: `<METHOD> <path>`, the path without query. */
+export const EDGE_ACTION = /^([A-Z]{3,7}) (\/[A-Za-z0-9_.~%:@+\/-]{0,200})$/;
+
 export interface LogsOptions {
   /** The log schemas present; an app left out is refused (D37). */
   schemas: Schemas;
+  /** The committed edge schema (D46); without it `source: "edge"` is refused as not configured. */
+  edgeSchema?: LogSchema;
   loki: Loki;
   /** app → stream selector and service (src/config.ts readLokiConfig) */
   sources: ReadonlyMap<App, LogSource>;
@@ -48,6 +67,35 @@ export function logQuery(source: LogSource, filter: LogFilter = {}): string {
   return stages.join(" | ");
 }
 
+/**
+ * `<edge stream> | json [| <level>] [| http_request_method="…" | http_client_request_url=~"…"] | __error__=""`.
+ * Edge lines are plain JSON, so one `| json` extracts their fields. `level`
+ * maps onto the access-log fields (D46): `error` is a WAF verdict other than
+ * pass or an origin status of 500 and up, `info` the rest. `waf_action` comes
+ * first so that `or` decides on it before converting the status to a number;
+ * `__error__=""` drops a line whose status is not a number instead of failing
+ * the count query. `action` is `<METHOD> <path>` (EDGE_ACTION) and matches the
+ * URL with or without scheme and host, with any query or fragment.
+ */
+export function edgeQuery(stream: string, filter: LogFilter = {}): string {
+  const stages = [stream, "json"];
+  if (filter.level === "error") stages.push('waf_action != "pass" or http_response_code_origin >= 500');
+  if (filter.level === "info") stages.push('waf_action = "pass" and http_response_code_origin < 500');
+  if (filter.action) {
+    const match = EDGE_ACTION.exec(filter.action);
+    if (!match) throw new Error(`not an edge action: ${filter.action}`);
+    const [, method, path] = match;
+    stages.push(`http_request_method=${quote(method!)}`);
+    stages.push(`http_client_request_url=~${quote(`(https?://[^/?#]+)?${escapeRegex(path!)}([?#].*)?`)}`);
+  }
+  stages.push('__error__=""');
+  return stages.join(" | ");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** `sum(count_over_time(<query> [<minutes>m]))`: the lines that matched, not only those returned. */
 export function countQuery(query: string, hours: number): string {
   return `sum(count_over_time(${query} [${Math.ceil(hours * 60)}m]))`;
@@ -57,6 +105,9 @@ export function countQuery(query: string, hours: number): string {
 function quote(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
+
+const source = z.enum(SOURCES).default("app")
+  .describe('Which log to read: "app" (the app\'s own log lines, default) or "edge" (its Edge Services access log)');
 
 const hours = z.number().positive("hours must be positive")
   .max(MAX_HOURS, `hours must be at most ${MAX_HOURS} (7 days)`)
@@ -78,11 +129,55 @@ export interface LogLine {
   payload: Json;
 }
 
+/** The tool error for `source: "edge"` on an app whose registry entry has no `edge`. */
+export function noEdgeSource(app: App): string {
+  return `${app} has no edge source`;
+}
+
+/** How one source's lines are selected and read. */
+interface Reader {
+  query(filter: LogFilter): string;
+  line(entry: LokiEntry): LogLine;
+  /** count_errors' group of a line: its key and the row fields that make it up. */
+  group(entry: LokiEntry): { key: string; row: Record<string, Json> };
+}
+
 export function registerLogTools(server: McpServer, gate: Gate, options: LogsOptions) {
   const { schemas, loki, sources, now = Date.now } = options;
   function window(h: number) {
     const end = now();
     return { start: nsOf(end - h * 3_600_000), end: nsOf(end) };
+  }
+
+  /** The reader of `app`'s `src`, or the tool error that refuses it before Loki is asked. */
+  function readerFor(app: App, src: Source): Reader | { refused: CallToolResult } {
+    const logSource = sources.get(app);
+    if (src === "edge") {
+      if (!logSource?.edgeStream) return { refused: error(noEdgeSource(app)) };
+      const { edgeSchema } = options;
+      if (!edgeSchema) return { refused: notConfigured(app, [`schemas/${EDGE_SCHEMA}.hyde-json.json is missing`]) };
+      const stream = logSource.edgeStream;
+      return {
+        query: (filter) => edgeQuery(stream, filter),
+        line: (entry) => toEdgeLine(entry, edgeSchema),
+        group: (entry) => {
+          const { action, status } = edgeFields(entry.line);
+          const row = { status, action: action ?? "[none]" };
+          return { key: `${status ?? "-"} ${row.action}`, row };
+        },
+      };
+    }
+    const schema = schemas.get(app);
+    if (!schema || !logSource) return { refused: notConfigured(app, logsMissing(app, options)) };
+    return {
+      query: (filter) => logQuery(logSource, filter),
+      line: (entry) => toLine(entry, schema),
+      group: (entry) => {
+        const { action } = toLine(entry, schema);
+        const key = typeof action === "string" ? action : "[none]";
+        return { key, row: { action: key } };
+      },
+    };
   }
 
   server.registerTool(
@@ -91,30 +186,39 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
       description:
         "Reads the app's production log lines of the last `hours`, newest first, optionally only one level or action. " +
         "Every line is redacted by the app's log field schema: undeclared and hidden fields read `[hidden]`, free text is scrubbed. " +
-        "Returns how many lines matched and how many were returned.",
+        "Returns how many lines matched and how many were returned. " +
+        '`source: "edge"` reads the app\'s Edge Services access log instead: `action` is `<METHOD> <path>`, ' +
+        "`level` error means the origin answered 5xx or the WAF did not pass the request, and the client IP and query strings are redacted.",
       inputSchema: {
         app: appSchema(gate.registry),
         hours,
         level: z.enum(["error", "info"]).optional().describe('Only lines of this level: "error" or "info"'),
-        action: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:\/-]{0,99}$/, "action must be an action name (letters, digits, _ . : / -)")
-          .optional().describe('Only lines of this action, e.g. "cron-task-reevaluate"'),
+        action: z.string()
+          .refine((v) => APP_ACTION.test(v) || EDGE_ACTION.test(v),
+            "action must be an action name (letters, digits, _ . : / -), or <METHOD> <path> for source edge")
+          .optional().describe('Only lines of this action, e.g. "cron-task-reevaluate", or "GET /api/sync" for source edge'),
         limit: z.number().int().min(1).max(MAX_LIMIT, `limit must be at most ${MAX_LIMIT}`).default(100)
           .describe(`Most lines to return (default 100, at most ${MAX_LIMIT})`),
+        source,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(gate, async ({ app, hours: h, level, action, limit }) => {
-      const schema = schemas.get(app);
-      const source = sources.get(app);
-      if (!schema || !source) return notConfigured(app, logsMissing(app, options));
+    forApp(gate, async ({ app, hours: h, level, action, limit, source: src }) => {
+      const reader = readerFor(app, src);
+      if ("refused" in reader) return reader.refused;
+      if (action !== undefined && !(src === "edge" ? EDGE_ACTION : APP_ACTION).test(action)) {
+        return error(src === "edge"
+          ? 'action must be <METHOD> <path> for source edge, e.g. "GET /api/sync"'
+          : "action must be an action name (letters, digits, _ . : / -)");
+      }
       return guard(async () => {
-        const query = logQuery(source, { level, action });
+        const query = reader.query({ level, action });
         const { start, end } = window(h);
         const [entries, matched] = await Promise.all([
           loki.queryRange(query, { start, end, limit }),
           loki.instant(countQuery(query, h), end),
         ]);
-        const lines = entries.map((e) => toLine(e, schema));
+        const lines = entries.map((e) => reader.line(e));
         return { matched: Math.max(matched, lines.length), returned: lines.length, lines };
       });
     }),
@@ -125,27 +229,27 @@ export function registerLogTools(server: McpServer, gate: Gate, options: LogsOpt
     {
       description:
         "Counts the app's error lines of the last `hours` by action, most frequent first. " +
-        `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there.`,
-      inputSchema: { app: appSchema(gate.registry), hours },
+        `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there. ` +
+        '`source: "edge"` counts the Edge Services access log\'s errors (origin 5xx or not passed by the WAF) by origin status and `<METHOD> <path>`.',
+      inputSchema: { app: appSchema(gate.registry), hours, source },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(gate, async ({ app, hours: h }) => {
-      const schema = schemas.get(app);
-      const source = sources.get(app);
-      if (!schema || !source) return notConfigured(app, logsMissing(app, options));
+    forApp(gate, async ({ app, hours: h, source: src }) => {
+      const reader = readerFor(app, src);
+      if ("refused" in reader) return reader.refused;
       return guard(async () => {
-        const entries = await loki.queryRange(logQuery(source, { level: "error" }), {
+        const entries = await loki.queryRange(reader.query({ level: "error" }), {
           ...window(h), limit: ERROR_SCAN_LIMIT,
-      });
-      const counts = new Map<string, number>();
-      for (const entry of entries) {
-        const { action } = toLine(entry, schema);
-        const key = typeof action === "string" ? action : "[none]";
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
-      const rows = [...counts].map(([action, count]) => ({ action, count }))
-        .sort((a, b) => b.count - a.count || a.action.localeCompare(b.action));
-      return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
+        });
+        const groups = new Map<string, { row: Record<string, Json>; count: number }>();
+        for (const entry of entries) {
+          const { key, row } = reader.group(entry);
+          const group = groups.get(key) ?? groups.set(key, { row, count: 0 }).get(key)!;
+          group.count += 1;
+        }
+        const rows = [...groups].sort(([ka, a], [kb, b]) => b.count - a.count || ka.localeCompare(kb))
+          .map(([, { row, count }]) => ({ ...row, count }));
+        return { rows, total: entries.length, partial: entries.length >= ERROR_SCAN_LIMIT };
       });
     }),
   );
@@ -159,6 +263,49 @@ export function toLine(entry: LokiEntry, schema: LogSchema): LogLine {
     return { timestamp, action: null, level: null, payload: line };
   }
   return { timestamp, action: line.action ?? null, level: line.level ?? null, payload: line.message ?? null };
+}
+
+/**
+ * One edge entry, redacted by the edge schema; `payload` is the whole redacted
+ * line. `action` and `level` are derived from the raw line (edgeFields).
+ */
+export function toEdgeLine(entry: LokiEntry, schema: LogSchema): LogLine {
+  const timestamp = new Date(Number(BigInt(entry.ns) / 1_000_000n)).toISOString();
+  const { line } = redactLine(entry.line, schema);
+  const { action, level } = edgeFields(entry.line);
+  return { timestamp, action, level, payload: line };
+}
+
+/**
+ * What the server derives from a raw edge line before redaction: `action`
+ * `<METHOD> <path>`, the path scrubbed as free text so that personal data in
+ * it cannot pass around the schema; `level` by the error mapping of edgeQuery;
+ * `status` the origin status. Each is null when the line does not carry it.
+ */
+export function edgeFields(raw: string): { action: string | null; level: "error" | "info" | null; status: number | null } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { action: null, level: null, status: null };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return { action: null, level: null, status: null };
+  const line = parsed as Record<string, unknown>;
+  const method = typeof line.http_request_method === "string" && /^[A-Z]{1,10}$/.test(line.http_request_method)
+    ? line.http_request_method : null;
+  const path = pathOf(line.http_client_request_url);
+  const origin = line.http_response_code_origin;
+  const status = typeof origin === "number" || (typeof origin === "string" && /^\d+$/.test(origin)) ? Number(origin) : null;
+  const level = line.waf_action !== "pass" || (status !== null && status >= 500) ? "error" : "info";
+  return { action: method && path ? `${method} ${scrubText(path)}` : null, level, status };
+}
+
+/** The path of a URL, with or without scheme and host, without query or fragment; null when it has none. */
+function pathOf(url: unknown): string | null {
+  if (typeof url !== "string") return null;
+  const path = /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*)?([^?#]*)/.exec(url)![1]!;
+  if (path === "") return url.includes("://") ? "/" : null;
+  return path.startsWith("/") ? path : null;
 }
 
 /** Tool errors carry a message, never a stack; only Loki's are passed on verbatim. */

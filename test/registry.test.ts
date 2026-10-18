@@ -31,6 +31,13 @@ describe("apps.json", () => {
     for (const [name, entry] of REGISTRY.apps) expect(entry.name).toBe(name);
   });
 
+  it("takes an optional edge source (D46): shop declares one, crm none", () => {
+    expect(REGISTRY.apps.get("shop")?.edge).toEqual({ stream: '{resource_name="shop-prod-es"}' });
+    expect(REGISTRY.apps.get("crm")?.edge).toBeUndefined();
+    expect(parseRegistry(third("edge", { stream: '{resource_name="help-desk-es"}' })).apps.get("third")?.edge?.stream)
+      .toBe('{resource_name="help-desk-es"}');
+  });
+
   it("accepts a third app", () => {
     expect(appNames(REGISTRY_WITH_THIRD).at(-1)).toBe("help-desk");
     expect(REGISTRY_WITH_THIRD.apps.get("help-desk")?.database.port).toBe(3306);
@@ -48,6 +55,9 @@ describe("apps.json", () => {
     ["an IP as host", third("database.host", "203.0.113.1"), /third\.database\.host: must be a DNS name/],
     ["an absolute path", third("logSchemaPath", "/etc/passwd"), /third\.logSchemaPath/],
     ["an unknown key", third("lokiStream", "x"), /third.*lokiStream/],
+    ["the reserved name edge", { apps: { edge: THIRD_APP } }, /edge: app name edge is reserved/],
+    ["an edge stream with a pipeline", third("edge", { stream: '{a="b"} | json' }), /third\.edge\.stream: must be a LogQL stream selector/],
+    ["an edge with an unknown key", third("edge", { stream: '{a="b"}', schema: "x" }), /third\.edge.*schema/],
     ["no app", { apps: {} }, /registers no app/],
     ["no apps key", {}, /apps/],
   ])("refuses %s, naming the path", (_, json, message) => {

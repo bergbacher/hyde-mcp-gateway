@@ -2,7 +2,8 @@
 // repository root, committed and free of secrets, holds one entry per app:
 // where its log field schema, redacted schema and hyde-db scripts live, its
 // Loki stream selector and `service` value, and its database endpoint with the
-// certificate name and the source of its instance CA. Each app's secrets come
+// certificate name and the source of its instance CA, and optionally a second
+// Loki source, its Edge Services access logs (`edge`, D46). Each app's secrets come
 // from the environment under `HYDE_APP_<NAME>_` (appVariables). Everything
 // that once named an app (the server, the fetch scripts, the wizard, infra/)
 // reads this file instead, so adding an app changes no code.
@@ -20,10 +21,13 @@ export const REGISTRY_FILE = fileURLToPath(new URL("../apps.json", import.meta.u
 export const APP_NAME = /^[a-z][a-z0-9-]*$/;
 /** A LogQL stream selector and nothing else: no pipeline, no second selector. */
 export const STREAM_SELECTOR = /^\{[^{}|`]+\}$/;
+/** Not app names: `schemas/edge.hyde-json.json` is the committed edge schema (D46), not an app's. */
+export const RESERVED_APP_NAMES: readonly string[] = ["edge"];
 
 const repo = z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "must be <owner>/<repo>");
 const repoPath = z.string().regex(/^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)*$/, "must be a relative path inside the repo");
 const nonEmpty = z.string().trim().min(1, "must not be empty");
+const streamSelector = z.string().regex(STREAM_SELECTOR, 'must be a LogQL stream selector ({label="value", …})');
 
 const entrySchema = z.strictObject({
   repo,
@@ -32,10 +36,16 @@ const entrySchema = z.strictObject({
   /** The directory holding hyde-db's redacted-views.sql and redacted-views-drop.sql. */
   redactedSqlPath: repoPath,
   loki: z.strictObject({
-    stream: z.string().regex(STREAM_SELECTOR, 'must be a LogQL stream selector ({label="value", …})'),
+    stream: streamSelector,
     /** The `service` field the app's log() writes. */
     service: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, "must be a service name"),
   }),
+  /**
+   * Optional: the app's Scaleway Edge Services access logs (D46), plain JSON
+   * lines without the app envelope, redacted by hyde-mcp-gateway's own
+   * `schemas/edge.hyde-json.json`. `source: "edge"` on the log tools reads it.
+   */
+  edge: z.strictObject({ stream: streamSelector }).optional(),
   database: z.strictObject({
     /** The endpoint's DNS name; TLS needs a name, not an address. */
     host: z.string().regex(/^(?=.*[A-Za-z])[A-Za-z0-9.-]+$/, "must be a DNS name"),
@@ -53,6 +63,7 @@ const registrySchema = z.strictObject({
     if (Object.keys(apps).length === 0) ctx.addIssue({ code: "custom", message: "registers no app" });
     for (const name of Object.keys(apps)) {
       if (!APP_NAME.test(name)) ctx.addIssue({ code: "custom", path: [name], message: "app name must match ^[a-z][a-z0-9-]*$" });
+      if (RESERVED_APP_NAMES.includes(name)) ctx.addIssue({ code: "custom", path: [name], message: `app name ${name} is reserved` });
     }
   }),
 });
