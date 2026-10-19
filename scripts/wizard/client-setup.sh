@@ -294,7 +294,9 @@ else
   note "Claude Desktop is not installed; only Claude Code is configured."
 fi
 # The clients start the bridge with their own PATH, so it names the directories.
-BRIDGE="export PATH=\"$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):\$PATH\" AUTH_HEADER=\"Bearer \$(gh auth token)\"; exec npx -y mcp-remote \"$GATEWAY_URL\" --transport http-only --header \"Authorization:\\\$\"'{AUTH_HEADER}'"
+# Two exports: bash expands every word of one before it runs, so `gh` would be
+# looked up on the client's PATH.
+BRIDGE="export PATH=\"$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):\$PATH\"; export AUTH_HEADER=\"Bearer \$(gh auth token)\"; exec npx -y mcp-remote \"$GATEWAY_URL\" --transport http-only --header \"Authorization:\\\$\"'{AUTH_HEADER}'"
 pause "Continue?"
 
 stage "GitHub login"
@@ -374,7 +376,8 @@ claude mcp get "$SERVER" | sed 's/^/    /' || die "Claude Code does not list $SE
 app="${SCOPE%% *}"; [[ -n "$app" ]] || app="${REGISTERED[0]}"
 say "Starts the bridge as the clients do and calls ping for $app (the first run downloads mcp-remote):"
 mkfifo "$TMP/in"
-/bin/bash -c "$BRIDGE" <"$TMP/in" >"$TMP/out" 2>"$TMP/err" &
+# With the PATH Claude Desktop gives it, so a bridge that relies on the shell's PATH fails here.
+env PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash -c "$BRIDGE" <"$TMP/in" >"$TMP/out" 2>"$TMP/err" &
 bridge_pid=$!
 exec 3>"$TMP/in"
 # A bridge that died already closes the pipe; the write fails and the wait below reports why.
