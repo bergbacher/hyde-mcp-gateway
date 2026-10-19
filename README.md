@@ -37,7 +37,7 @@ The server starts with every app in `apps.json`. Its boot step, `boot()` in [`sr
 
 The server listens on `PORT` (default 8080). `/health` needs no token; `/mcp` needs `Authorization: Bearer <token>`, where every `HYDE_TOKEN_<CLIENT>` variable is one client's token (at least 32 characters) and `HYDE_TOKEN_<CLIENT>_APPS` its app scope. A GitHub token works as well (see [GitHub tokens as client credentials](#github-tokens-as-client-credentials)). Verification sits behind `TokenVerifier` in [`src/mcp/auth.ts`](src/mcp/auth.ts): GitHub-shaped tokens go to the GitHub verifier, every other token to the static ones. `.mcp.json` registers the production server for Claude Code with the token from `HYDE_TOKEN_CLAUDE_CODE`; `HYDE_URL=http://localhost:8080/mcp` points it at the local one.
 
-Client setup, issuing and rotating client tokens, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
+A person connects Claude Code and Claude Desktop with their GitHub login through one wizard, `bash scripts/wizard/client-setup.sh` (no clone needed; D59); a service account gets a static token. Both, and a first analysis: [`docs/runbooks/client-setup.md`](docs/runbooks/client-setup.md).
 
 ## Adding an app
 
@@ -310,7 +310,7 @@ Then:
    pnpm infra:diff
    ```
 7. Set the repository variable `HYDE_DEPLOY_ENABLED` to `true`. From then on every push to `main` deploys.
-8. Point the clients at `<endpoint>/mcp` with their tokens.
+8. Point the clients at `<endpoint>/mcp`: people through the client wizard with their GitHub login, service accounts with their tokens ([runbook](docs/runbooks/client-setup.md)).
 
 ### Rotate a client token
 
