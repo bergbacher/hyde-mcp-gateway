@@ -21,8 +21,8 @@ interface World {
   http?: number;
   /** The apps `ping` reports as in scope, among the registered `shop` and `crm`. */
   scope?: string[];
-  /** Claude Desktop is installed (its config directory exists). */
-  desktop?: boolean;
+  /** Claude Desktop is installed: its config directory exists, or only the app (never started). */
+  desktop?: boolean | "app-only";
   /** Which of the fakes exist on the PATH. */
   tools?: ("gh" | "claude" | "npx")[];
 }
@@ -72,6 +72,7 @@ esac
 printf '%s\\n' "curl $*" >> "$FAKE_LOG"
 OUT=/dev/stdout; BODY=""
 while (($#)); do case "$1" in -o) OUT="$2"; shift ;; -d) BODY="$2"; shift ;; esac; shift; done
+[[ -e "$FAKE_DIR/curl-called" ]] && FAKE_HTTP="\${FAKE_HTTP_AFTER:-$FAKE_HTTP}"; : > "$FAKE_DIR/curl-called"
 if [[ "$FAKE_HTTP" != 200 ]]; then printf '{"error":"fake"}' > "$OUT"; printf '%s' "$FAKE_HTTP"; exit 0; fi
 ${PING}
 ping "$BODY" 1
@@ -104,7 +105,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-function run(world: World = {}, args: string[] = []) {
+function run(world: World = {}, args: string[] = [], extra: Record<string, string> = {}) {
   const { loggedIn = true, http = 200, scope = ["shop"], desktop = false, tools = ["gh", "claude", "npx"] } = world;
   const bin = join(dir, "bin");
   mkdirSync(bin, { recursive: true });
@@ -112,16 +113,17 @@ function run(world: World = {}, args: string[] = []) {
     writeFileSync(join(bin, name), FAKES[name]!);
     chmodSync(join(bin, name), 0o755);
   }
-  if (desktop) mkdirSync(join(home, "Library", "Application Support", "Claude"), { recursive: true });
+  if (desktop === true) mkdirSync(join(home, "Library", "Application Support", "Claude"), { recursive: true });
+  if (desktop === "app-only") mkdirSync(join(dir, "Applications", "Claude.app"), { recursive: true });
   // The wizard looks the tools up on the PATH and puts their directories on the bridge's PATH:
   // node stays real but lives next to the fakes, so the bridge finds the fake npx, not the real one.
   if (!existsSync(join(bin, "node"))) symlinkSync(process.execPath, join(bin, "node"));
   const proc = spawnSync("bash", [SCRIPT, ...args], {
     env: {
       PATH: `${bin}:/usr/bin:/bin`,
-      HOME: home,
+      HOME: home, HYDE_DESKTOP_APP: join(dir, "Applications", "Claude.app"),
       FAKE_DIR: dir, FAKE_LOG: log,
-      FAKE_LOGGED_IN: loggedIn ? "1" : "0", FAKE_HTTP: String(http), FAKE_SCOPE: scope.join(","),
+      FAKE_LOGGED_IN: loggedIn ? "1" : "0", FAKE_HTTP: String(http), FAKE_SCOPE: scope.join(","), ...extra,
     },
     input: "\n".repeat(20),
     encoding: "utf8",
@@ -217,6 +219,20 @@ describe("client-setup.sh with Claude Desktop installed", () => {
     expect(entry.args[1]).toContain('AUTH_HEADER="Bearer $(gh auth token)"');
     expect(entry.args[1]).not.toContain("gho_");
     expect(out).toMatch(/Quit Claude Desktop and open it again/);
+  });
+
+  it("creates the config directory when Desktop was installed but never started", () => {
+    const { status, out } = run({ desktop: "app-only" });
+    expect(status).toBe(0);
+    expect(desktopConfig().mcpServers["hyde-mcp-gateway"]!.command).toBe("/bin/bash");
+    expect(out).toMatch(/ping answered/);
+  });
+
+  it("a 503 while reading the scope is reported as GitHub unreachable", () => {
+    // The first ping (registered apps) passes; the scope ping for shop gets 503.
+    const { status, out } = run({ http: 200, scope: ["shop"] }, [], { FAKE_HTTP_AFTER: "503" });
+    expect(status).toBe(1);
+    expect(out).toMatch(/could not reach GitHub/);
   });
 
   it("keeps other servers and holds one entry after two runs", () => {

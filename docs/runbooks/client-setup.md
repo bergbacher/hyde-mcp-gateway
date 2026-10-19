@@ -22,7 +22,7 @@ It needs `gh`, Claude Code and `node` (for the bridge below); a missing one stop
 1. `gh auth status`; if not logged in, `gh auth login` in the browser.
 2. One authenticated `ping` to the gateway. 401 means the token is not accepted (GitHub rejected it; `gh auth refresh`). 503 means the gateway could not reach GitHub; the token is fine, try again in a minute. Success names the registered apps and those in scope. An empty scope means: ask for read access to the app repositories; the gateway needs no change.
 3. Registers `hyde-mcp-gateway` in Claude Code at user scope, so every project sees it.
-4. Writes the same entry to Claude Desktop's `~/Library/Application Support/Claude/claude_desktop_config.json` when Desktop is installed. Desktop reads the file at start: quit it and open it again.
+4. Writes the same entry to Claude Desktop's `~/Library/Application Support/Claude/claude_desktop_config.json` when Desktop is installed. Desktop reads the file at start: quit it and open it again, then check by hand that its tools include `ping`.
 5. Starts the registered entry as the clients do, calls `ping` through it and prints the scope.
 
 Re-running is safe: each client ends up with one entry.
@@ -38,7 +38,7 @@ exec npx -y mcp-remote "<url>" --transport http-only --header "Authorization:\$"
 
 `gh auth token` runs when the client starts; mcp-remote reads the header from its environment (the literal `${AUTH_HEADER}`, spelled so that Claude Code's own `${VAR}` expansion of a config never sees it). The token is in no file and in no process argument. The wizard writes the directories of `node` and `gh` into the bridge's `PATH`, since Desktop starts it without a shell profile.
 
-The repository's [`.mcp.json`](../../.mcp.json) holds the same bridge for a Claude Code session opened in this repository, with `${HYDE_URL:-<production url>}` as the URL. Against a server on your machine (README, Run locally): `HYDE_URL=http://localhost:8080/mcp claude`. The local server checks a GitHub token against GitHub as production does, so your login works there as well.
+The repository's [`.mcp.json`](../../.mcp.json) holds the same bridge for a Claude Code session opened in this repository, with `${HYDE_URL:-<production url>}` as the URL and without the `PATH` line, since `claude` runs from a shell that has `node` and `gh`. `npx` fetches mcp-remote from the npm registry on the first start. Against a server on your machine (README, Run locally): `HYDE_URL=http://localhost:8080/mcp claude`. The local server checks a GitHub token against GitHub as production does, so your login works there as well.
 
 ### Check the connection
 

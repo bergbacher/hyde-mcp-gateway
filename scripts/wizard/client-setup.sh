@@ -186,6 +186,7 @@ finish() {
 
 # ──────────────────────────────────────────────────────────────────────────
 # STAGES: author this section. One stage() per step the human takes.
+# Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 #
 # Registers the production gateway in Claude Code and, when installed, Claude
@@ -198,17 +199,19 @@ finish() {
 # Both clients get the same stdio bridge: `bash -c` reads the token with
 # `gh auth token` when the client starts, hands it to mcp-remote through its
 # environment (never argv, never a file) and mcp-remote sends it as the
-# Authorization header to the gateway. mcp-remote reads the header value from
-# the literal `${AUTH_HEADER}`, which the bridge spells as `\$` + `{AUTH_HEADER}`
-# so that Claude Code's own `${VAR}` expansion of a config never sees it. Claude Code cannot run a command for
-# an HTTP header and Claude Desktop sends no custom header at all, so the
-# bridge is what keeps the token off the disk in both. Re-runnable: each
-# client holds one entry afterwards. Runbook: docs/runbooks/client-setup.md.
+# Authorization header to the gateway. mcp-remote reads the header value
+# from the literal `${AUTH_HEADER}`, which the bridge spells as `\$` +
+# `{AUTH_HEADER}` so that Claude Code's own `${VAR}` expansion of a config
+# never sees it. Claude Code cannot run a command for an HTTP header and
+# Claude Desktop sends no custom header at all, so the bridge is what keeps
+# the token off the disk in both. Re-runnable: each client holds one entry
+# afterwards. Runbook: docs/runbooks/client-setup.md.
 
 GATEWAY_URL="https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp"
 SERVER=hyde-mcp-gateway
 DESKTOP_DIR="$HOME/Library/Application Support/Claude"
 DESKTOP_CONFIG="$DESKTOP_DIR/claude_desktop_config.json"
+# HYDE_DESKTOP_APP: where the Desktop app is looked for; the tests point it elsewhere.
 TOTAL_STAGES=6
 
 die() { printf '  %s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; exit 1; }
@@ -226,8 +229,20 @@ need() {
 
 # probe APP: POSTs a `ping` for APP to the gateway as the token; prints the
 # HTTP status, leaves the body in $TMP/body. The token goes to curl through
-# its config on stdin, not through argv.
+# its config on stdin, not through argv. Stops on every status but 200,
+# telling a rejected token (401) from a gateway that could not ask GitHub (503).
 probe() {
+  local code
+  code="$(request "$1")" || die "curl failed: is the network up?"
+  case "$code" in
+    200) ;;
+    401) die "this GitHub token is not accepted: GitHub rejected it. Run 'gh auth status' and 'gh auth refresh', then re-run." ;;
+    503) die "the gateway could not reach GitHub to check the token; your token is fine. Try again in a minute." ;;
+    *) die "the gateway answered HTTP $code for app $1: $(cat "$TMP/body")" ;;
+  esac
+}
+
+request() {
   printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -sS -K - -o "$TMP/body" -w '%{http_code}' \
     -X POST "$GATEWAY_URL" \
     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
@@ -272,9 +287,8 @@ need gh "Install it: brew install gh"
 need claude "Install Claude Code: curl -fsSL https://claude.ai/install.sh | bash"
 need node "Install it: brew install node (the bridge runs mcp-remote through npx)"
 need npx "Install it: brew install node"
-need curl "Install it: brew install curl"
 DESKTOP=0
-if [[ -d "$DESKTOP_DIR" || -d /Applications/Claude.app ]]; then
+if [[ -d "$DESKTOP_DIR" || -d "${HYDE_DESKTOP_APP:-/Applications/Claude.app}" ]]; then
   DESKTOP=1; say "${GREEN}✓${RESET} Claude Desktop: $DESKTOP_CONFIG"
 else
   note "Claude Desktop is not installed; only Claude Code is configured."
@@ -292,29 +306,23 @@ else
   gh auth status -h github.com >/dev/null 2>&1 || die "gh is still not logged in"
   say "${GREEN}✓${RESET} logged in"
 fi
-TOKEN="$(gh auth token)" || die "gh auth token printed no token"
-[[ -n "$TOKEN" ]] || die "gh auth token printed no token"
+TOKEN="$(gh auth token)" || die "gh auth token failed"
+[[ -n "$TOKEN" ]] || die "gh auth token printed nothing"
 pause
 
 stage "Token check against the gateway"
 say "One authenticated ping to $GATEWAY_URL"
-code="$(probe -)" || die "curl failed: is the network up?"
-case "$code" in
-  200) ;;
-  401) die "this GitHub token is not accepted: GitHub rejected it. Run 'gh auth status' and 'gh auth refresh', then re-run." ;;
-  503) die "the gateway could not reach GitHub to check the token; your token is fine. Try again in a minute." ;;
-  *) die "the gateway answered HTTP $code: $(cat "$TMP/body")" ;;
-esac
+probe -
 text="$(body_text)"
 [[ "$text" == "unknown app -; registered: "* ]] || die "unexpected answer from the gateway: $text"
 REGISTERED=()
 for app in ${text#*registered: }; do REGISTERED+=("${app%,}"); done
+((${#REGISTERED[@]})) || die "the gateway registers no app"
 say "${GREEN}✓${RESET} token accepted; registered apps: ${REGISTERED[*]}"
 # The scope comes from a ping inside it: the first app this token may read answers with the whole scope.
 SCOPE=""
 for app in "${REGISTERED[@]}"; do
-  code="$(probe "$app")" || die "curl failed"
-  [[ "$code" == 200 ]] || die "the gateway answered HTTP $code for $app"
+  probe "$app"
   text="$(body_text)"
   if [[ "$text" == "{"* ]]; then SCOPE="$(scope_of "$text")"; break; fi
   [[ "$text" == *"is not authorized for app"* ]] || die "unexpected answer for $app: $text"
@@ -340,6 +348,7 @@ pause
 stage "Claude Desktop"
 if (( DESKTOP )); then
   say "Writes the same bridge to ${DESKTOP_CONFIG/#$HOME/~}, replacing an existing $SERVER entry."
+  mkdir -p "$DESKTOP_DIR"   # absent until Desktop's first start
   node -e '
     const fs = require("node:fs");
     const [file, name, command, ...args] = process.argv.slice(1);
@@ -368,13 +377,16 @@ mkfifo "$TMP/in"
 /bin/bash -c "$BRIDGE" <"$TMP/in" >"$TMP/out" 2>"$TMP/err" &
 bridge_pid=$!
 exec 3>"$TMP/in"
-rpc_ping "$app" >&3
-for _ in $(seq 1 120); do grep -q '"id":2' "$TMP/out" 2>/dev/null && break; sleep 0.5; done
+# A bridge that died already closes the pipe; the write fails and the wait below reports why.
+rpc_ping "$app" >&3 2>/dev/null || true
+for _ in $(seq 1 360); do grep -q '"id":2' "$TMP/out" 2>/dev/null && break; sleep 0.5; done
 exec 3>&-
+# npx runs mcp-remote as a child; end both.
+pkill -P "$bridge_pid" 2>/dev/null || true
 kill "$bridge_pid" 2>/dev/null || true
 wait "$bridge_pid" 2>/dev/null || true
 answer="$(grep '"id":2' "$TMP/out" || true)"
-[[ -n "$answer" ]] || die "the bridge gave no answer within 60 s: $(tail -n 3 "$TMP/err")"
+[[ -n "$answer" ]] || die "the bridge gave no answer within 3 minutes: $(tail -n 3 "$TMP/err")"
 text="$(tool_text "$answer")"
 if [[ "$text" == "{"* ]]; then
   say "${GREEN}✓${RESET} ping answered; scope: $(scope_of "$text")"
