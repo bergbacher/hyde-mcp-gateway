@@ -118,8 +118,28 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
       await dbs.close();
     });
 
+    // mysql2 resumes TLS sessions; a resumed handshake carries no certificate,
+    // so a second connection of the same pool must not fail the name check.
+    it("connects a second, resumed connection of the same pool", async () => {
+      const dbs = tls(CERT_NAME!);
+      await dbs.query("crm", "SELECT 1", 1);
+      const both = await Promise.all([
+        dbs.query("crm", "SELECT SLEEP(0.2), 1", 1),
+        dbs.query("crm", "SELECT SLEEP(0.2), 2", 1),
+      ]);
+      expect(both.map((r) => String(r.rows[0][1]))).toEqual(["1", "2"]);
+      await dbs.close();
+    });
+
     it("refuses a certificate that does not carry the name", async () => {
       const dbs = tls("some-other-instance");
+      await expect(dbs.query("crm", "SELECT 1", 1)).rejects.toThrow(/does not match some-other-instance/);
+      await dbs.close();
+    });
+
+    it("keeps refusing after a refusal, on a connection that could resume the session", async () => {
+      const dbs = tls("some-other-instance");
+      await expect(dbs.query("crm", "SELECT 1", 1)).rejects.toThrow(/does not match some-other-instance/);
       await expect(dbs.query("crm", "SELECT 1", 1)).rejects.toThrow(/does not match some-other-instance/);
       await dbs.close();
     });

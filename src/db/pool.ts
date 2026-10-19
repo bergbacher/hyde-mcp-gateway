@@ -15,6 +15,12 @@
 // (`servername`), on every connection before its first query (A13). With the
 // self-signed instance certificate as the only trust anchor, the chain check
 // already pins that certificate; the name check confirms which one.
+//
+// mysql2 resumes TLS sessions, cached per pool (its `ssl` object). A resumed
+// handshake carries no certificate, so only a full handshake is checked, as
+// mysql2 checks its own identity: the session it resumes was issued by a full
+// handshake under the same CA. A refused certificate ends the pool, and with it
+// the cached session, so no later connection can resume what was refused.
 
 import { checkServerIdentity, TLSSocket } from "node:tls";
 import type { Connection } from "mysql2";
@@ -107,11 +113,20 @@ export function createDatabases(
         verifyIdentity(conn, servername);
       } catch (e) {
         conn.destroy();
+        await dropPool(app);
         throw e;
       }
       verified.add(conn.connection);
     }
     return conn;
+  }
+
+  /** Ends the app's pool; the next connection opens a new one, without its TLS sessions. */
+  async function dropPool(app: App) {
+    const p = pools.get(app);
+    if (!p) return;
+    pools.delete(app);
+    await p.end().catch(() => undefined);
   }
 
   return {
@@ -128,6 +143,8 @@ export function createDatabases(
 function verifyIdentity(conn: mysql.PoolConnection, servername: string) {
   const socket = (conn.connection as unknown as { stream: unknown }).stream;
   if (!(socket instanceof TLSSocket)) throw new Error("Database connection is not TLS although the URL sets ssl=true");
+  // A resumed session presents no certificate (getPeerCertificate() is empty).
+  if (socket.isSessionReused()) return;
   const error = checkServerIdentity(servername, socket.getPeerCertificate());
   if (error) throw new Error(`Database certificate does not match ${servername}: ${error.message}`);
 }
