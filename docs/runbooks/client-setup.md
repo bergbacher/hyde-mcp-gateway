@@ -1,84 +1,61 @@
 # Client setup
 
-How a client reaches the production server: Claude Code's `.mcp.json` (D9), issuing and rotating a client token (D16), and a first analysis that checks no personal data comes through. An agent runner (D5, D10) configures the same endpoint with its own token in its own secret store.
+How a client reaches the production gateway: a person with their GitHub login (D59), a service account with a static token (D16), and a first analysis that checks no personal data comes through.
 
-`<endpoint>` is the container's host name. `pnpm infra:apply` prints it as `endpoint=` (README, Deploy); it is not a secret. The token is.
+The gateway's URL is `https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp`. It is not a secret; the token is.
 
-## 1. Claude Code
+## 1. A person: GitHub token
 
-The repo's [`.mcp.json`](../../.mcp.json) registers the server for every Claude Code session opened in this repo:
+The credential is the GitHub token of the logged-in `gh`. The gateway asks GitHub who the token is and which app repositories it can read; those apps are its scope. There is nothing to issue, nothing to store and nothing to rotate: read access to an app's repository is read access to its logs and database through the gateway. A token that reads no app repository is accepted with an empty scope, so every tool refuses it.
 
-```json
-{
-  "mcpServers": {
-    "hyde-mcp-gateway": {
-      "type": "http",
-      "url": "${HYDE_URL:-https://<endpoint>/mcp}",
-      "headers": { "Authorization": "Bearer ${HYDE_TOKEN_CLAUDE_CODE}" }
-    }
-  }
-}
-```
+### The wizard
 
-Claude Code expands `${VAR}` and `${VAR:-default}` in `url` and `headers` when it starts. Without `HYDE_URL` it connects to production. Once the first deploy has printed the endpoint, replace `<endpoint>` with it and commit.
-
-To use the server from another project, copy the same block into that project's `.mcp.json` with the endpoint filled in.
-
-### The token comes from a secret store
-
-`HYDE_TOKEN_CLAUDE_CODE` holds the token that the `apply.env` line of the same name put on the container. Keep it in a secret store and export it from there. Never write the value into `.mcp.json`, an `.env` file or any other file in a repo, and never paste it into a Claude Code prompt.
-
-macOS Keychain. Store the token once; `-w` without a value prompts for it, so it stays out of shell history:
+Runs on macOS without a clone of this repository:
 
 ```sh
-security add-generic-password -a "$USER" -s hyde-mcp-gateway-claude-code -w
+curl -fsSLO https://raw.githubusercontent.com/bergbacher/hyde-mcp-gateway/main/scripts/wizard/client-setup.sh
+bash client-setup.sh
 ```
 
-Export it in your shell profile (outside the repo). The profile holds the lookup, not the value:
+It needs `gh`, Claude Code and `node` (for the bridge below); a missing one stops it with the install command. Then:
+
+1. `gh auth status`; if not logged in, `gh auth login` in the browser.
+2. One authenticated `ping` to the gateway. 401 means the token is not accepted (GitHub rejected it; `gh auth refresh`). 503 means the gateway could not reach GitHub; the token is fine, try again in a minute. Success names the registered apps and those in scope. An empty scope means: ask for read access to the app repositories; the gateway needs no change.
+3. Registers `hyde-mcp-gateway` in Claude Code at user scope, so every project sees it.
+4. Writes the same entry to Claude Desktop's `~/Library/Application Support/Claude/claude_desktop_config.json` when Desktop is installed. Desktop reads the file at start: quit it and open it again, then check by hand that its tools include `ping`.
+5. Starts the registered entry as the clients do, calls `ping` through it and prints the scope.
+
+Re-running is safe: each client ends up with one entry.
+
+### The bridge
+
+Claude Code cannot run a command to fill an HTTP header, and Claude Desktop sends no custom header at all, so both run the gateway through a stdio bridge:
 
 ```sh
-# zsh / bash
-export HYDE_TOKEN_CLAUDE_CODE="$(security find-generic-password -s hyde-mcp-gateway-claude-code -w)"
+export AUTH_HEADER="Bearer $(gh auth token)"
+exec npx -y mcp-remote@0.15.1 "<url>" --transport http-only --header "Authorization:\$"'{AUTH_HEADER}'
 ```
 
-```fish
-# fish
-set -gx HYDE_TOKEN_CLAUDE_CODE (security find-generic-password -s hyde-mcp-gateway-claude-code -w)
-```
+`gh auth token` runs when the client starts; mcp-remote reads the header from its environment (the literal `${AUTH_HEADER}`, spelled so that Claude Code's own `${VAR}` expansion of a config never sees it). The token is in no file and in no process argument. The wizard writes the directories of `node` and `gh` into the bridge's `PATH`, since Desktop starts it without a shell profile.
 
-Or scope it to one session instead of every shell:
+The repository's [`.mcp.json`](../../.mcp.json) holds the same bridge for a Claude Code session opened in this repository, with `${HYDE_URL:-<production url>}` as the URL and without the `PATH` line, since `claude` runs from a shell that has `node` and `gh`. `npx` fetches mcp-remote from the npm registry on the first start. Against a server on your machine (README, Run locally): `HYDE_URL=http://localhost:8080/mcp claude`. The local server checks a GitHub token against GitHub as production does, so your login works there as well.
 
-```sh
-HYDE_TOKEN_CLAUDE_CODE="$(security find-generic-password -s hyde-mcp-gateway-claude-code -w)" claude
-```
-
-With 1Password CLI, read it the same way: `op read "op://<vault>/hyde-mcp-gateway/claude-code"`.
+mcp-remote is pinned to one reviewed release in the wizard, `.mcp.json` and this runbook. Unpinned, `npx` asks the registry for the newest release on every start, and the bridge runs it with your GitHub token in its environment. A pin stops a new or hijacked release from reaching the token; it does not pin mcp-remote's own dependencies, which use version ranges. Bump the version on purpose, in all three places, after reading the release.
 
 ### Check the connection
 
-Start `claude` in the repo. The first time, it asks whether to trust the project's MCP server; accept. `/mcp` should show `hyde-mcp-gateway` as connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with `app: "crm"`. The answer `{"app":"crm","client":"claude-code","apps":["shop","crm"],"scope":"*"}` confirms the token and the client name, lists the apps registered in `apps.json`, and shows the apps this token may read (`scope`, `"*"` for all; see [App scope](#app-scope)). An app outside the scope answers `client claude-code is not authorized for app <app>`; ping one inside it.
+`/mcp` in Claude Code shows `hyde-mcp-gateway` connected with five tools: `ping`, `query_logs`, `count_errors`, `describe_schema` and `query_sql`. Ask it to call `ping` with an app you may read. The answer `{"app":"crm","client":"gh:<login>","apps":["shop","crm"],"scope":["crm"]}` names you, lists the apps registered in `apps.json` and the apps this token may read.
 
-If `/mcp` shows the server as failed, check these:
+- `client gh:<login> is not authorized for app <app>`: your token cannot read that app's repository. Ask the app's team for read access; the gateway's scope follows within five minutes (`HYDE_GITHUB_SCOPE_TTL_SECONDS`), or at once with a new token. Do not ask for a gateway change.
+- The server shows as failed: run the wizard again; its token check tells a rejected token from GitHub being unreachable. The container scales to zero, so the first request after idle can take several seconds; retry once.
 
-- `HYDE_TOKEN_CLAUDE_CODE` is empty in the shell that started `claude`: the server answers 401.
-- `<endpoint>` has not been filled in yet.
-- The container scales to zero, so the first request after idle can take several seconds. Retry once before you investigate further.
+### A fine-grained PAT instead of `gh`
 
-### Local variant
+A token that is not the `gh` login, for example a fine-grained PAT with `Contents: read` on the app repositories, goes into a secret store and replaces `gh auth token` in the bridge: `AUTH_HEADER="Bearer $(security find-generic-password -s hyde-mcp-gateway -w)"` for the macOS Keychain (`security add-generic-password -a "$USER" -s hyde-mcp-gateway -w` stores it, prompting for the value), or `op read "op://<vault>/hyde-mcp-gateway/token"` with 1Password CLI. Never write the value into `.mcp.json`, an `.env` file or a prompt.
 
-Against a server on your machine (README, Run locally), point the same entry at it with `HYDE_URL`. The local server reads its client token from `HYDE_TOKEN_CLAUDE_CODE` too, so one throwaway value serves both sides:
+## 2. A service account: static token
 
-```sh
-export HYDE_TOKEN_CLAUDE_CODE=$(openssl rand -hex 32)
-HYDE_TOKEN_CLAUDE_CODE_APPS='*' pnpm dev &        # plus the other variables README, Run locally lists
-HYDE_URL=http://localhost:8080/mcp claude
-```
-
-That throwaway token is a different value from the production one and never goes into `apply.env`.
-
-## 2. Issue or rotate a client token
-
-The operator who holds `apply.env` (gitignored, on their machine only) does this. Every client has its own token, `HYDE_TOKEN_<CLIENT>`. The suffix, lowercased with `_` as `-`, is the client name that `ping` reports.
+An agent runner (D5, D10) or any client that is not a person gets a static token. The operator who holds `apply.env` (gitignored, on their machine only) does this. Every client has its own token, `HYDE_TOKEN_<CLIENT>`. The suffix, lowercased with `_` as `-`, is the client name that `ping` reports.
 
 ### App scope
 
@@ -102,20 +79,20 @@ HYDE_TOKEN_CLAUDE_CODE_APPS=*
 
 ### Rotate (or issue)
 
-Run from the repo root, with the `scw` key for your Scaleway project in scope (README, Deploy). The examples rotate Claude Code's token; for another client, replace `CLAUDE_CODE` and the Keychain service name.
+Run from the repo root, with the `scw` key for your Scaleway project in scope (README, Deploy). The examples rotate the agent runner's token; for another client, replace `AGENT`.
 
-1. Keep the old token for the check in step 5. Then generate the new one without printing it:
+1. Keep the old token for the check in step 5 (from the client's secret store). Then generate the new one without printing it:
 
    ```sh
-   old="$(security find-generic-password -s hyde-mcp-gateway-claude-code -w)"
+   old="$(op read "op://<vault>/hyde-mcp-gateway/agent")"
    new="$(openssl rand -hex 32)"
    ```
 
 2. Replace (or add) the client's line in `apply.env`:
 
    ```sh
-   sed -i '' "s/^HYDE_TOKEN_CLAUDE_CODE=.*/HYDE_TOKEN_CLAUDE_CODE=$new/" apply.env   # macOS sed
-   grep -c '^HYDE_TOKEN_CLAUDE_CODE=' apply.env                                     # must print 1
+   sed -i '' "s/^HYDE_TOKEN_AGENT=.*/HYDE_TOKEN_AGENT=$new/" apply.env   # macOS sed
+   grep -c '^HYDE_TOKEN_AGENT=' apply.env                               # must print 1
    ```
 
 3. Apply, then compare:
@@ -128,14 +105,13 @@ Run from the repo root, with the `scw` key for your Scaleway project in scope (R
    Without `HYDE_IMAGE_TAG`, `apply` keeps the running image, rolls the container to a new revision with the new secret and returns once that revision is ready. `diff` compares secret names, never values, so a rotation shows no drift. For a new client, `diff` must list the new name live; for a removed one, it must no longer list the old name.
 
 4. Hand the token over out of band, never through an issue, PR, commit, Slack channel or agent prompt:
-   - Claude Code (your own): put it straight into the Keychain item: `security add-generic-password -U -a "$USER" -s hyde-mcp-gateway-claude-code -w "$new"`. Then restart `claude` from a shell that exported the new value.
-   - Another client: put it into that client's secret store yourself, or hand it to its owner through a password manager share or in person.
+   - Put it into the client's secret store yourself, or hand it to its owner through a password manager share or in person.
 
 5. Check that the old token is refused and the new one is accepted:
 
    ```sh
    probe() {
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST "https://<endpoint>/mcp" \
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST "https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp" \
        -H "Authorization: Bearer $1" \
        -H 'Content-Type: application/json' \
        -H 'Accept: application/json, text/event-stream' \
