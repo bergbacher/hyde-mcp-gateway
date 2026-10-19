@@ -147,3 +147,4 @@ Single source of truth for this product. Every record: ID, type (A assumption, D
 - 2026-10-19 — D60 amended (button via message edit later); D63, D64 proposed. by: @darivs
 - 2026-10-19 — D24–D33, D35, D40–D42, D44 accepted (active). D60 decided: Analyze link in the card text. D63 withdrawn, Q8 opened. D64 active. by: @darivs
 - 2026-10-19 — D46, D51, D52, D54, D61, D62 accepted; D47 and D48 decided. by: @darivs
+- 2026-10-19 — D62 implemented: `query_logs` and `count_errors` take an optional `until` (ISO 8601 with a time zone, at most a minute ahead); `hours` counts back from it, still capped at 168; both responses echo `from` and `until` (issue #25). by: @darivs (proposed by Claude)
