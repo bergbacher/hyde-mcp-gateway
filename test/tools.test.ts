@@ -10,19 +10,21 @@ import { sqlReadiness } from "../src/mcp/sql.ts";
 import { SchemaStore } from "../src/schema-store.ts";
 import { parseLogSchemaText, schemaFile } from "../src/schemas.ts";
 import { buildLogSources } from "../src/sources/index.ts";
-import { ALL_APPS, answering, connectInMemory, REGISTRY, textOf, untouchable } from "./helpers.ts";
+import { ALL_APPS, answering, connectInMemory, FIXTURE_REDACTED_SCHEMA, REGISTRY, textOf, untouchable } from "./helpers.ts";
 
 describe("describe_schema", () => {
   it("returns the app's redacted schema loaded from schemas/", async () => {
     const dir = mkdtempSync(join(tmpdir(), "hyde-schemas-"));
-    writeFileSync(join(dir, "shop.redacted-schema.md"), "# shop redacted schema\n");
+    writeFileSync(join(dir, "shop.redacted-schema.md"), FIXTURE_REDACTED_SCHEMA);
     const store = new SchemaStore({ registry: REGISTRY, dir, log: () => {}, warn: () => {} });
     await store.refresh();
     const schemas = store.redactedSchemas;
-    expect(schemas).toEqual(new Map([["shop", "# shop redacted schema\n"]]));
+    expect(schemas).toEqual(new Map([["shop", FIXTURE_REDACTED_SCHEMA]]));
 
-    const client = await connectInMemory({ sql: sqlReadiness({ databases: untouchable, schemas }) });
-    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop redacted schema\n");
+    // The views match the schema: no notice.
+    const databases = answering(() => Promise.reject(new Error("reached query")));
+    const client = await connectInMemory({ sql: sqlReadiness({ databases, schemas }) });
+    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe(FIXTURE_REDACTED_SCHEMA);
     const missing = await client.callTool({ name: "describe_schema", arguments: { app: "crm" } });
     expect(missing.isError).toBe(true);
     expect(textOf(missing)).toBe("crm is not configured: redacted schema is missing");
@@ -82,7 +84,7 @@ describe("app scope at the SQL tools (D39)", () => {
     });
     return { databases, queries };
   }
-  const schemas = new Map([["shop", "# shop\n"], ["crm", "# crm\n"]]);
+  const schemas = new Map([["shop", FIXTURE_REDACTED_SCHEMA], ["crm", "# crm\n"]]);
   const shopOnly = { client: "agent", apps: new Set(["shop"]) };
 
   it("refuses an app outside the scope at describe_schema and query_sql without touching the database", async () => {
@@ -100,7 +102,7 @@ describe("app scope at the SQL tools (D39)", () => {
   it("allows an app in scope", async () => {
     const { databases, queries } = counting();
     const client = await connectInMemory({ sql: sqlReadiness({ databases, schemas }), principal: shopOnly });
-    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop\n");
+    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe(FIXTURE_REDACTED_SCHEMA);
     const result = await client.callTool({ name: "query_sql", arguments: { app: "shop", sql: "SELECT 1;" } });
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(textOf(result))).toEqual({ columns: ["1"], rows: [[1]], truncated: false });

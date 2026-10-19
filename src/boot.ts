@@ -10,6 +10,12 @@
 // D59, then the static tokens) is built here too. Nothing listens here: the
 // entry point (src/mcp/main.ts) boots, listens and prints the report.
 //
+// For each app ready for SQL, boot runs the stale-view check once (D48,
+// src/db/views.ts) and waits for it: the info line names every app whose
+// views differ from its redacted schema, or could not be checked, and a warn
+// line per such app carries the same notice. A failed check does not stop the
+// start.
+//
 // Throws, and so refuses to start, on an invalid registry, client token or
 // scope, database URL, Loki configuration, stream override or schema refresh
 // interval, and when the committed edge schema is missing or invalid
@@ -17,7 +23,8 @@
 // stop the start: it is not configured until a refresh loads them (D58).
 
 import { readConfig, readLokiConfig, type Config } from "./config.ts";
-import { createDatabases } from "./db/pool.ts";
+import { createDatabases, type Databases } from "./db/pool.ts";
+import { staleNotice } from "./db/views.ts";
 import { createLoki } from "./loki.ts";
 import { scopeOf } from "./mcp/auth.ts";
 import { createVerifier, type AppOptions } from "./mcp/http.ts";
@@ -38,9 +45,11 @@ export interface BootInputs {
   schemaStore?: Pick<SchemaStoreOptions, "fetch" | "log" | "warn">;
   /** The GitHub verifier's fetch and clock, for tests. */
   github?: AppOptions["github"];
+  /** Builds the redacted databases from each app's database config; defaults to a pool per app (src/db/pool.ts). For tests. */
+  databases?: (configs: Config["databases"]) => Databases;
 }
 
-/** The startup report: one info line, then a warn line per app that is not fully configured. */
+/** The startup report: one info line, then a warn line per app that is not fully configured and per app with stale views. */
 export interface StartupReport {
   info: {
     level: "info";
@@ -57,8 +66,10 @@ export interface StartupReport {
     schemas: { source: "github" | "local"; refreshSeconds: number; logs: Record<App, number>; redacted: App[] };
     /** app → source → the stream selector it reads. */
     sources: Record<App, Record<string, string>>;
+    /** app → the stale-view notice at startup (D48), for each SQL-ready app whose views differ or could not be checked. */
+    staleViews: Record<App, string>;
   };
-  warnings: { level: "warn"; message: string; app?: App; missing?: Record<string, string[]> }[];
+  warnings: { level: "warn"; message: string; app?: App; missing?: Record<string, string[]>; detail?: string }[];
 }
 
 export interface Booted {
@@ -76,6 +87,7 @@ export async function boot({
   env = process.env,
   schemaStore = {},
   github,
+  databases = createDatabases,
 }: BootInputs = {}): Promise<Booted> {
   const config = readConfig(registry, env);
   const lokiConfig = readLokiConfig(env);
@@ -86,12 +98,20 @@ export async function boot({
     sources: buildLogSources({ registry, schemas: schemas.logSchemas, edgeSchema, env }),
     loki: createLoki({ url: lokiConfig.url, token: lokiConfig.token }),
   };
-  const sql = sqlReadiness({ databases: createDatabases(config.databases), schemas: schemas.redactedSchemas });
+  const sql = sqlReadiness({ databases: databases(config.databases), schemas: schemas.redactedSchemas });
   const verifier = createVerifier(config, registry, github);
   const options = { registry, logs, sql, verifier };
 
   // Per app and tool group, what is missing at startup; an empty list means it answers.
   const missing = appNames(registry).map((app) => ({ app, groups: { ...logs.sources.groups(app), sql: sql.missing(app) } }));
+  // The stale-view check per SQL-ready app, in parallel; the readiness keeps each result.
+  const stale = (await Promise.all(missing
+    .filter(({ groups }) => groups.sql.length === 0)
+    .map(async ({ app }) => {
+      const check = await sql.checkViews(app);
+      const notice = staleNotice(check);
+      return notice ? [{ app, notice, detail: check.ok ? undefined : check.detail }] : [];
+    }))).flat();
 
   const report: StartupReport = {
     info: {
@@ -112,6 +132,7 @@ export async function boot({
         redacted: [...schemas.redactedSchemas.keys()],
       },
       sources: Object.fromEntries(appNames(registry).map((app) => [app, logs.sources.streams(app)])),
+      staleViews: Object.fromEntries(stale.map(({ app, notice }) => [app, notice])),
     },
     warnings: [
       ...(schemas.mode === "local"
@@ -122,6 +143,7 @@ export async function boot({
         if (lacks.length === 0) return [];
         return [{ level: "warn" as const, message: `${app} is not fully configured: ${lacks.join("; ")}`, app, missing: groups }];
       }),
+      ...stale.map(({ app, notice, detail }) => ({ level: "warn" as const, message: `${app}: ${notice}`, app, ...(detail ? { detail } : {}) })),
     ],
   };
   return { config, options, schemas, report };

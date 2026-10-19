@@ -72,6 +72,33 @@ describe.skipIf(!URL_)("query_sql against MySQL", () => {
     await hasty.close();
   });
 
+  describe("stale views (D48)", () => {
+    const schema = (columns: string[]) =>
+      ["# Redacted database schema", "", "## `users`", "", "| column | Prisma type | notes |", "|---|---|---|",
+        ...columns.map((c) => `| \`\` \`${c}\` \`\` | String |  |`), ""].join("\n");
+
+    async function describeSchema(document: string) {
+      const client = await connectInMemory({ sql: sqlReadiness({ databases, schemas: new Map([["crm", document]]) }) });
+      const result = await client.callTool({ name: "describe_schema", arguments: { app: "crm" } });
+      await client.close();
+      return textOf(result);
+    }
+
+    it("reads, as the reader, the views and columns of `redacted` only", async () => {
+      // The base table's `email` is not visible to the reader, so it does not appear.
+      expect((await databases.viewColumns("crm")).sort()).toEqual([["users", "id"], ["users", "status"]]);
+    });
+
+    it("returns the document alone when the views match it", async () => {
+      expect(await describeSchema(schema(["id", "status"]))).toBe(schema(["id", "status"]));
+    });
+
+    it("names the differences for a document the views lag behind", async () => {
+      const newer = `${schema(["id", "status", "plan"])}\n## \`orders\`\n\n| column | Prisma type | notes |\n|---|---|---|\n| \`\` \`id\` \`\` | Int |  |\n`;
+      expect(await describeSchema(newer)).toMatch(/^Stale views: missing views `orders`; view `users` lacks `plan`\. .*Fix: drop → migrate → apply/);
+    });
+  });
+
   describe.skipIf(!CA_FILE || !CERT_NAME)("over TLS", () => {
     const tlsUrl = () => {
       const u = new URL(URL_!);
