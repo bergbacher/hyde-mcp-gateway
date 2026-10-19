@@ -149,6 +149,10 @@ Every line Loki returns goes through `redactLine` with the app's schema before i
 
 TLS follows the apps' runtime: the server certificate is verified against the instance CA, and its identity is checked against the app's `database.certName` in `apps.json` (or `HYDE_APP_<NAME>_CERT_NAME`) rather than the host, since an instance certificate need not name the endpoint host and never its address. Without `ssl=true` (outside production) the connection is plain, for a local MySQL. An app without a URL or without its redacted schema answers `describe_schema` and `query_sql` that it is not configured ([Per-app readiness](#per-app-readiness)).
 
+### Stale views
+
+A deploy that migrates without re-applying the views leaves them behind the app's `redacted-schema.md`. At startup, for each app ready for SQL, and on every `describe_schema` call, the server compares the views and columns the document lists with what the reader sees in `information_schema.COLUMNS` for database `redacted` (one query, no extra grant, 15 s timeout; [`src/db/views.ts`](src/db/views.ts)). When they differ, `describe_schema` puts a notice above the document, such as ``Stale views: missing views `orders`; view `users` lacks `plan`. … Fix: drop → migrate → apply (docs/runbooks/redacted-reader.md)``, and the startup info line (`staleViews`) and a warn line per app carry the same notice. When the database cannot be read, the notice says the check could not run, the warn line adds the database's error, and `describe_schema` still returns the document. The server never repairs the views (D2): run [drop → migrate → apply](docs/runbooks/redacted-reader.md#re-apply-after-a-migration-drop--migrate--apply). `query_sql` does not check.
+
 ## hyde-json
 
 [`packages/hyde-json`](packages/hyde-json) redacts one raw log line by a declared field schema (D12, D13, D23). Each app declares its schema in its own repo; this server enforces it.
@@ -187,7 +191,7 @@ pnpm test
 
 ### Integration test
 
-`test/query.integration.test.ts` runs `query_sql` and the database module's `query` ([`src/db/pool.ts`](src/db/pool.ts)) against a local MySQL and is skipped unless `HYDE_TEST_MYSQL_URL` is set. With Homebrew `mysql@8.4`:
+`test/query.integration.test.ts` runs `query_sql`, the stale-view check of `describe_schema` and the database module's `query` ([`src/db/pool.ts`](src/db/pool.ts)) against a local MySQL and is skipped unless `HYDE_TEST_MYSQL_URL` is set. With Homebrew `mysql@8.4`:
 
 ```sh
 brew install mysql@8.4 && brew services start mysql@8.4

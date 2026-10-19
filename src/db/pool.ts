@@ -4,6 +4,8 @@
 // 15 s statement timeout, a row cap and a 1 MB result cap. Rows are streamed,
 // so a query that would return more is cut off at the cap instead of being
 // read into memory. Database errors reject with the database's message unchanged.
+// It also reads, as the same reader and under the same timeout, which views
+// and columns the reader sees, for the stale-view check (D48, ./views.ts).
 //
 // Behind the interface: one mysql2 pool per app, created on first use.
 //
@@ -19,6 +21,7 @@ import type { Connection } from "mysql2";
 import mysql from "mysql2/promise";
 import type { App } from "../registry.ts";
 import type { DatabaseConfig } from "./connection.ts";
+import { VIEW_COLUMNS_SQL } from "./views.ts";
 
 export const DEFAULT_LIMIT = 200;
 export const MAX_LIMIT = 1000;
@@ -46,6 +49,12 @@ export interface Databases {
    * certificate does not carry the app's certificate name.
    */
   query(app: App, sql: string, limit: number | undefined): Promise<QueryResult>;
+  /**
+   * Every (view, column) of database `redacted` the reader sees: one
+   * information_schema query (VIEW_COLUMNS_SQL) under the statement timeout,
+   * without the row and result caps. Rejects as `query` does.
+   */
+  viewColumns(app: App): Promise<[string, string][]>;
   has(app: App): boolean;
   close(): Promise<void>;
 }
@@ -108,6 +117,7 @@ export function createDatabases(
   return {
     has: (app) => configs.has(app),
     query: async (app, sql, limit) => run(await connect(app), sql, clampLimit(limit), bounds),
+    viewColumns: async (app) => readViewColumns(await connect(app), bounds),
     async close() {
       await Promise.all([...pools.values()].map((p) => p.end()));
       pools.clear();
@@ -176,6 +186,29 @@ async function run(conn: mysql.PoolConnection, sql: string, limit: number, { tim
   } finally {
     if (!stopped) conn.release();
   }
+}
+
+/** Runs VIEW_COLUMNS_SQL on `conn`, then releases it, or destroys it after a fatal error. */
+async function readViewColumns(conn: mysql.PoolConnection, { timeoutMs }: Bounds): Promise<[string, string][]> {
+  let destroyed = false;
+  try {
+    // A pooled connection may carry the row cap of an earlier query_sql run.
+    await conn.query("SET SESSION max_execution_time = ?, sql_select_limit = DEFAULT", [timeoutMs]);
+    const [rows] = await conn.query({ sql: VIEW_COLUMNS_SQL, rowsAsArray: true, timeout: timeoutMs + 2_000 });
+    return (rows as unknown[][]).map(([view, column]) => [text(view), text(column)]);
+  } catch (e) {
+    if ((e as { fatal?: boolean }).fatal) {
+      destroyed = true;
+      conn.destroy();
+    }
+    throw e;
+  } finally {
+    if (!destroyed) conn.release();
+  }
+}
+
+function text(value: unknown): string {
+  return Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
 }
 
 function toJson(value: unknown): unknown {

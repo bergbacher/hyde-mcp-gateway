@@ -55,10 +55,26 @@ export function textOf(result: unknown): string {
   return (result as { content: { text: string }[] }).content[0]!.text;
 }
 
-/** A database whose only behaviour is `query`; every app is configured. */
-export function answering(query: Databases["query"]): Databases {
-  return { has: () => true, query, close: async () => {} };
+/**
+ * A database whose behaviour is `query` and, for the stale-view check,
+ * `viewColumns`, by default the views and columns of
+ * test/fixtures/redacted-schema.md; every app is configured.
+ */
+export function answering(query: Databases["query"], viewColumns: Databases["viewColumns"] = async () => FIXTURE_VIEW_COLUMNS): Databases {
+  return { has: () => true, query, viewColumns, close: async () => {} };
 }
 
+/** test/fixtures/redacted-schema.md, as hyde-db writes it for MySQL: views `users` and `orders`. */
+export const FIXTURE_REDACTED_SCHEMA = readFileSync(new URL("./fixtures/redacted-schema.md", import.meta.url), "utf8");
+
+/** The information_schema rows for views matching FIXTURE_REDACTED_SCHEMA, as the reader sees them. */
+export const FIXTURE_VIEW_COLUMNS: [string, string][] = [
+  ["orders", "id"], ["orders", "user_id"], ["orders", "total_cents"], ["orders", "placed_at"],
+  ["users", "id"], ["users", "created_at"], ["users", "country"], ["users", "plan"],
+];
+
 /** A database that fails the test if anything reaches it. */
-export const untouchable: Databases = answering(() => Promise.reject(new Error("reached the database")));
+export const untouchable: Databases = answering(
+  () => Promise.reject(new Error("reached the database")),
+  () => Promise.reject(new Error("reached the database")),
+);

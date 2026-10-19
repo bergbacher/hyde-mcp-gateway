@@ -163,7 +163,7 @@ describe("SchemaStore with a token (GitHub)", () => {
     expect(logs.isError).toBe(true);
     expect(textOf(logs)).toBe("crm is not configured: log schema is missing");
     expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "crm" } }))).toBe("crm is not configured: redacted schema is missing");
-    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toBe("# shop\n");
+    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app: "shop" } }))).toMatch(/\n\n# shop\n$/);
     await client.close();
   });
 

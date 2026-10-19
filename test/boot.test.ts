@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { boot, type BootInputs, type Booted } from "../src/boot.ts";
 import { edgeSchemaFile, redactedSchemaFile, schemaFile } from "../src/schemas.ts";
-import { connectInMemory, REGISTRY, textOf } from "./helpers.ts";
+import type { Databases } from "../src/db/pool.ts";
+import { answering, connectInMemory, FIXTURE_REDACTED_SCHEMA, FIXTURE_VIEW_COLUMNS, REGISTRY, textOf } from "./helpers.ts";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/schemas/", import.meta.url));
 const dirs: string[] = [];
@@ -17,7 +18,7 @@ function schemasWith(files: { logs?: ("shop" | "crm")[]; redacted?: ("shop" | "c
   dirs.push(dir);
   if (files.edge !== false) copyFileSync(edgeSchemaFile(), edgeSchemaFile(dir));
   for (const app of files.logs ?? []) copyFileSync(schemaFile(app, FIXTURES), schemaFile(app, dir));
-  for (const app of files.redacted ?? []) writeFileSync(redactedSchemaFile(app, dir), `# ${app} redacted schema\n`);
+  for (const app of files.redacted ?? []) writeFileSync(redactedSchemaFile(app, dir), FIXTURE_REDACTED_SCHEMA);
   return dir;
 }
 
@@ -38,9 +39,16 @@ const ENV = {
 
 const DEVELOPER_MODE = { level: "warn", message: "APP_REPOS_READ_TOKEN is not set: reading schemas/ (developer mode)" };
 
-/** Boots on `schemaDir` with the store's log lines silenced; the store is stopped after the test. */
+/** Databases for the apps boot configured, answering the stale-view check with `viewColumns` (default: matching the fixture schema). */
+function fakeDatabases(viewColumns: Databases["viewColumns"] = async () => FIXTURE_VIEW_COLUMNS): BootInputs["databases"] {
+  return (configs) => ({ ...answering(() => Promise.reject(new Error("reached query")), viewColumns), has: (app) => configs.has(app) });
+}
+
+/** Boots on `schemaDir` with the store's log lines silenced and fake databases; the store is stopped after the test. */
 async function bootOn(schemaDir: string, inputs: BootInputs = {}): Promise<Booted> {
-  const b = await boot({ registry: REGISTRY, env: ENV, schemaDir, schemaStore: { log: () => {}, warn: () => {} }, ...inputs });
+  const b = await boot({
+    registry: REGISTRY, env: ENV, schemaDir, schemaStore: { log: () => {}, warn: () => {} }, databases: fakeDatabases(), ...inputs,
+  });
   booted.push(b);
   return b;
 }
@@ -63,6 +71,7 @@ describe("boot", () => {
         shop: { app: '{resource_name="example-shop-prod"}', edge: '{resource_name="shop-prod-es"}' },
         crm: { app: '{resource_name="example-crm-prod"}' },
       },
+      staleViews: {},
     });
     expect(report.warnings).toEqual([DEVELOPER_MODE, {
       level: "warn",
@@ -73,7 +82,7 @@ describe("boot", () => {
 
     const client = await connectInMemory(options);
     const call = async (name: string, args: Record<string, unknown>) => textOf(await client.callTool({ name, arguments: args }));
-    expect(await call("describe_schema", { app: "shop" })).toBe("# shop redacted schema\n");
+    expect(await call("describe_schema", { app: "shop" })).toBe(FIXTURE_REDACTED_SCHEMA);
     // Ready: the statement guard answers, not readiness.
     expect(await call("query_sql", { app: "shop", sql: "UPDATE x SET y = 1" })).toMatch(/^Refused before reaching the database/);
     for (const name of ["describe_schema", "query_sql"]) {
@@ -117,13 +126,40 @@ describe("boot", () => {
 
     // The app repo fixes its files; the next refresh reaches the tools without a restart.
     copyFileSync(schemaFile("crm", FIXTURES), schemaFile("crm", schemaDir));
-    writeFileSync(redactedSchemaFile("crm", schemaDir), "# crm redacted schema\n");
+    writeFileSync(redactedSchemaFile("crm", schemaDir), FIXTURE_REDACTED_SCHEMA);
     await schemas.refresh();
     expect(options.logs.sources.missing("crm", "app")).toEqual([]);
     expect(options.sql.missing("crm")).toEqual(["HYDE_APP_CRM_REDACTED_URL is not set"]);
     expect(await call("count_errors", "crm")).not.toMatch(/not configured/);
     expect(await call("describe_schema", "crm")).toBe("crm is not configured: HYDE_APP_CRM_REDACTED_URL is not set");
     await client.close();
+  });
+
+  it("checks the views of each SQL-ready app at startup: the info line and a warn line name the differences (D48)", async () => {
+    // Views generated from an older schema: `orders` is missing, `users` lacks `plan` and still has `email_hash`.
+    const older: [string, string][] = [["users", "id"], ["users", "created_at"], ["users", "country"], ["users", "email_hash"]];
+    const { options, report } = await bootOn(schemasWith({ logs: ["shop"], redacted: ["shop"] }), { databases: fakeDatabases(async () => older) });
+    const notice =
+      "Stale views: missing views `orders`; view `users` lacks `plan`, has columns not in this schema `email_hash`. " +
+      "Queries that name them may fail. Fix: drop → migrate → apply (docs/runbooks/redacted-reader.md).";
+    expect(report.info.staleViews).toEqual({ shop: notice });
+    expect(report.warnings).toContainEqual({ level: "warn", message: `shop: ${notice}`, app: "shop" });
+    // The readiness keeps the startup result.
+    expect(options.sql.lastCheck("shop")).toEqual({
+      ok: true,
+      diff: { missingViews: ["orders"], extraViews: [], columnDiffs: [{ view: "users", missing: ["plan"], extra: ["email_hash"] }] },
+    });
+    // An app that is not SQL-ready is not checked.
+    expect(options.sql.lastCheck("crm")).toBeUndefined();
+  });
+
+  it("starts when the stale-view check cannot read the database, and warns with the database's error", async () => {
+    const { report } = await bootOn(schemasWith({ logs: ["shop"], redacted: ["shop"] }), {
+      databases: fakeDatabases(() => Promise.reject(new Error("connect ECONNREFUSED"))),
+    });
+    const notice = "Stale views: the check could not run: the redacted database could not be read. The views may not match this schema.";
+    expect(report.info.staleViews).toEqual({ shop: notice });
+    expect(report.warnings).toContainEqual({ level: "warn", message: `shop: ${notice}`, app: "shop", detail: "connect ECONNREFUSED" });
   });
 
   it("refuses to boot without the committed edge schema, naming the file", async () => {

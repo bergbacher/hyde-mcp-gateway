@@ -173,7 +173,8 @@ describe("tools against the registry", () => {
     const logql = new URL(requests[0]!).searchParams.get("query")!;
     expect(logql.startsWith(`${THIRD_APP.loki.stream} | json`)).toBe(true);
     expect(logql).toContain('service="help-desk"');
-    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app } }))).toBe("# help-desk redacted schema\n");
+    // The (untouchable) database cannot be read for the stale-view check; the schema still comes back.
+    expect(textOf(await client.callTool({ name: "describe_schema", arguments: { app } }))).toMatch(/^Stale views: the check could not run: .*\n\n# help-desk redacted schema\n$/);
     // Reaches the (untouchable) database: the registry and readiness let it through.
     const sql = await client.callTool({ name: "query_sql", arguments: { app, sql: "SELECT 1" } });
     expect(textOf(sql)).toBe("reached the database");
