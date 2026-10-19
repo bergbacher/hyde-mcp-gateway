@@ -209,6 +209,10 @@ finish() {
 
 GATEWAY_URL="https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp"
 SERVER=hyde-mcp-gateway
+# One reviewed release: unpinned, npx fetches the newest on every start, and
+# the bridge holds the GitHub token in its environment. Bump it on purpose,
+# in .mcp.json and the runbook too. Its own dependencies still float (^).
+BRIDGE_PACKAGE=mcp-remote@0.15.1
 DESKTOP_DIR="$HOME/Library/Application Support/Claude"
 DESKTOP_CONFIG="$DESKTOP_DIR/claude_desktop_config.json"
 # HYDE_DESKTOP_APP: where the Desktop app is looked for; the tests point it elsewhere.
@@ -296,7 +300,7 @@ fi
 # The clients start the bridge with their own PATH, so it names the directories.
 # Two exports: bash expands every word of one before it runs, so `gh` would be
 # looked up on the client's PATH.
-BRIDGE="export PATH=\"$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):\$PATH\"; export AUTH_HEADER=\"Bearer \$(gh auth token)\"; exec npx -y mcp-remote \"$GATEWAY_URL\" --transport http-only --header \"Authorization:\\\$\"'{AUTH_HEADER}'"
+BRIDGE="export PATH=\"$(dirname "$(command -v node)"):$(dirname "$(command -v gh)"):\$PATH\"; export AUTH_HEADER=\"Bearer \$(gh auth token)\"; exec npx -y $BRIDGE_PACKAGE \"$GATEWAY_URL\" --transport http-only --header \"Authorization:\\\$\"'{AUTH_HEADER}'"
 pause "Continue?"
 
 stage "GitHub login"

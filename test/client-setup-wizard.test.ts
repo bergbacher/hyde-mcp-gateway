@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = join(import.meta.dirname, "..", "scripts", "wizard", "client-setup.sh");
 const GATEWAY = "https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp";
+/** The bridge runs one reviewed release; npx would otherwise fetch the newest on every start, with the token in its environment. */
+const BRIDGE_PACKAGE = "mcp-remote@0.15.1";
 
 /** How the fakes behave in one run. Every value lands in the fakes' environment. */
 interface World {
@@ -166,7 +168,7 @@ describe("client-setup.sh with gh, Claude Code and no Claude Desktop", () => {
     expect(status).toBe(0);
     const add = calls.split("\n").find((line) => line.startsWith("claude mcp add"))!;
     expect(add).toMatch(/^claude mcp add -s user hyde-mcp-gateway -- \/bin\/bash -c /);
-    expect(add).toContain(`mcp-remote "${GATEWAY}"`);
+    expect(add).toContain(`npx -y ${BRIDGE_PACKAGE} "${GATEWAY}"`);
     expect(add).toContain('AUTH_HEADER="Bearer $(gh auth token)"');
     expect(add).toContain(`--header "Authorization:\\$"'{AUTH_HEADER}'`);
     expect(add).toContain("--transport http-only");
@@ -187,7 +189,7 @@ describe("client-setup.sh with gh, Claude Code and no Claude Desktop", () => {
   it("pings through the configured bridge and prints the scope it answers", () => {
     const { out, calls } = run({ scope: ["shop", "crm"] });
     // The bridge hands mcp-remote the literal ${AUTH_HEADER} to read from its environment, where the token is.
-    expect(calls).toMatch(/^npx -y mcp-remote .* --header Authorization:\$\{AUTH_HEADER\} AUTH=Bearer gho_/m);
+    expect(calls).toMatch(/^npx -y mcp-remote@0\.15\.1 .* --header Authorization:\$\{AUTH_HEADER\} AUTH=Bearer gho_/m);
     expect(out).toMatch(/ping answered; scope: shop crm/);
   });
 
@@ -215,7 +217,7 @@ describe("client-setup.sh with Claude Desktop installed", () => {
     const entry = desktopConfig().mcpServers["hyde-mcp-gateway"]!;
     expect(entry.command).toBe("/bin/bash");
     expect(entry.args[0]).toBe("-c");
-    expect(entry.args[1]).toContain(`mcp-remote "${GATEWAY}"`);
+    expect(entry.args[1]).toContain(`npx -y ${BRIDGE_PACKAGE} "${GATEWAY}"`);
     expect(entry.args[1]).toContain('AUTH_HEADER="Bearer $(gh auth token)"');
     expect(entry.args[1]).not.toContain("gho_");
     expect(out).toMatch(/Quit Claude Desktop and open it again/);

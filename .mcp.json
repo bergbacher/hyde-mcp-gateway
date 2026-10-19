@@ -4,7 +4,7 @@
       "command": "/bin/bash",
       "args": [
         "-c",
-        "export AUTH_HEADER=\"Bearer $(gh auth token)\"; exec npx -y mcp-remote \"${HYDE_URL:-https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp}\" --transport http-only --header \"Authorization:\\$\"'{AUTH_HEADER}'"
+        "export AUTH_HEADER=\"Bearer $(gh auth token)\"; exec npx -y mcp-remote@0.15.1 \"${HYDE_URL:-https://connextparb09d6769-hyde-mcp-gateway.functions.fnc.fr-par.scw.cloud/mcp}\" --transport http-only --header \"Authorization:\\$\"'{AUTH_HEADER}'"
       ]
     }
   }

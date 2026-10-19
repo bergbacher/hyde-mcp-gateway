@@ -33,12 +33,14 @@ Claude Code cannot run a command to fill an HTTP header, and Claude Desktop send
 
 ```sh
 export AUTH_HEADER="Bearer $(gh auth token)"
-exec npx -y mcp-remote "<url>" --transport http-only --header "Authorization:\$"'{AUTH_HEADER}'
+exec npx -y mcp-remote@0.15.1 "<url>" --transport http-only --header "Authorization:\$"'{AUTH_HEADER}'
 ```
 
 `gh auth token` runs when the client starts; mcp-remote reads the header from its environment (the literal `${AUTH_HEADER}`, spelled so that Claude Code's own `${VAR}` expansion of a config never sees it). The token is in no file and in no process argument. The wizard writes the directories of `node` and `gh` into the bridge's `PATH`, since Desktop starts it without a shell profile.
 
 The repository's [`.mcp.json`](../../.mcp.json) holds the same bridge for a Claude Code session opened in this repository, with `${HYDE_URL:-<production url>}` as the URL and without the `PATH` line, since `claude` runs from a shell that has `node` and `gh`. `npx` fetches mcp-remote from the npm registry on the first start. Against a server on your machine (README, Run locally): `HYDE_URL=http://localhost:8080/mcp claude`. The local server checks a GitHub token against GitHub as production does, so your login works there as well.
+
+mcp-remote is pinned to one reviewed release in the wizard, `.mcp.json` and this runbook. Unpinned, `npx` asks the registry for the newest release on every start, and the bridge runs it with your GitHub token in its environment. A pin stops a new or hijacked release from reaching the token; it does not pin mcp-remote's own dependencies, which use version ranges. Bump the version on purpose, in all three places, after reading the release.
 
 ### Check the connection
 
