@@ -16,6 +16,11 @@ import { appSchema, error, forApp, notConfigured, text, type Gate, type Registra
 
 export const MAX_HOURS = 168;
 export const MAX_LIMIT = 500;
+/** How far in the future `until` may lie, for clock skew between client and server. */
+export const MAX_UNTIL_SKEW_MS = 60_000;
+/** An ISO 8601 date-time with a time zone: `Z` or an offset. */
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/i;
+const UNTIL_FORMAT = 'until must be an ISO 8601 timestamp with a time zone, e.g. "2026-10-18T12:00:00Z"';
 /** Error lines count_errors reads at most; Loki's default `max_entries_limit_per_query`. */
 export const ERROR_SCAN_LIMIT = 5000;
 
@@ -38,14 +43,30 @@ const source = z.enum(SOURCES).default(SOURCES[0])
 const hours = z.number().positive("hours must be positive")
   .max(MAX_HOURS, `hours must be at most ${MAX_HOURS} (7 days)`)
   .default(24)
-  .describe(`How far back to read, in hours (default 24, at most ${MAX_HOURS})`);
+  .describe(`How far back to read, in hours, counted back from \`until\` (default 24, at most ${MAX_HOURS})`);
+
+const until = z.string().optional()
+  .describe('End of the window, an ISO 8601 timestamp with a time zone, e.g. "2026-10-18T12:00:00Z" (default now, at most a minute ahead)');
 
 const notes = (key: "queryLogs" | "countErrors") => KINDS.flatMap((k) => (k.describe[key] ? [` ${k.describe[key]}`] : [])).join("");
 
 export function registerLogTools(server: Registrar, gate: Gate, { sources, loki, now = Date.now }: LogsOptions) {
-  function window(h: number) {
-    const end = now();
-    return { start: nsOf(end - h * 3_600_000), end: nsOf(end) };
+  /**
+   * The window of `h` hours ending at `until` (default now), in ns for Loki and
+   * as ISO strings for the response, or the tool error refusing `until`.
+   * `hours` is capped by its schema, so the window never exceeds MAX_HOURS.
+   */
+  function window(h: number, until: string | undefined):
+    { start: bigint; end: bigint; from: string; until: string } | { refused: CallToolResult } {
+    const current = now();
+    let end = current;
+    if (until !== undefined) {
+      end = ISO_TIMESTAMP.test(until) ? Date.parse(until) : NaN;
+      if (Number.isNaN(end)) return { refused: error(UNTIL_FORMAT) };
+      if (end > current + MAX_UNTIL_SKEW_MS) return { refused: error("until must not be more than a minute in the future") };
+    }
+    const begin = end - h * 3_600_000;
+    return { start: nsOf(begin), end: nsOf(end), from: new Date(begin).toISOString(), until: new Date(end).toISOString() };
   }
 
   /** The reader of `app`'s `src` and its LogQL for `filter`, or the tool error that refuses them before Loki is asked. */
@@ -61,12 +82,13 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
     "query_logs",
     {
       description:
-        "Reads the app's production log lines of the last `hours`, newest first, optionally only one level or action. " +
+        "Reads the app's production log lines of the `hours` before `until` (default now), newest first, optionally only one level or action. " +
         "Every line is redacted by the app's log field schema: undeclared and hidden fields read `[hidden]`, free text is scrubbed. " +
-        "Returns how many lines matched and how many were returned." + notes("queryLogs"),
+        "Returns the window (`from`, `until`), how many lines matched and how many were returned." + notes("queryLogs"),
       inputSchema: {
         app: appSchema(gate.registry),
         hours,
+        until,
         level: z.enum(LEVELS).optional()
           .describe(`Only lines of this level: "error" or "info"${KINDS.map((k) => (k.describe.level ? `; ${k.describe.level}` : "")).join("")}`),
         action: z.string().optional()
@@ -77,18 +99,20 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(gate, async ({ app, hours: h, level, action, limit, source: src }) => {
+    forApp(gate, async ({ app, hours: h, until: u, level, action, limit, source: src }) => {
+      const win = window(h, u);
+      if ("refused" in win) return win.refused;
       const opened = open(app, src, { level, action });
       if ("refused" in opened) return opened.refused;
       const { reader, query } = opened;
       return guard(async () => {
-        const { start, end } = window(h);
+        const { start, end, from, until } = win;
         const [entries, matched] = await Promise.all([
           loki.queryRange(query.logql, { start, end, limit }),
           loki.instant(countQuery(query.logql, h), end),
         ]);
         const lines = entries.map((e) => reader.line(e));
-        return { matched: Math.max(matched, lines.length), returned: lines.length, lines };
+        return { from, until, matched: Math.max(matched, lines.length), returned: lines.length, lines };
       });
     }),
   );
@@ -97,17 +121,21 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
     "count_errors",
     {
       description:
-        "Counts the app's error lines of the last `hours` by action, most frequent first. " +
-        `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there.` + notes("countErrors"),
-      inputSchema: { app: appSchema(gate.registry), hours, source },
+        "Counts the app's error lines of the `hours` before `until` (default now) by action, most frequent first. " +
+        `Reads at most ${ERROR_SCAN_LIMIT} error lines; \`partial: true\` says the counts stop there. Returns the window (\`from\`, \`until\`).` +
+        notes("countErrors"),
+      inputSchema: { app: appSchema(gate.registry), hours, until, source },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    forApp(gate, async ({ app, hours: h, source: src }) => {
+    forApp(gate, async ({ app, hours: h, until: u, source: src }) => {
+      const win = window(h, u);
+      if ("refused" in win) return win.refused;
+      const { start, end, from, until } = win;
       const opened = open(app, src, { level: "error" });
       if ("refused" in opened) return opened.refused;
       const { reader, query } = opened;
       return guard(async () => {
-        const entries = await loki.queryRange(query.logql, { ...window(h), limit: ERROR_SCAN_LIMIT });
+        const entries = await loki.queryRange(query.logql, { start, end, limit: ERROR_SCAN_LIMIT });
         const groups = new Map<string, { row: Record<string, Json>; count: number }>();
         let total = 0;
         for (const entry of entries) {
@@ -120,7 +148,7 @@ export function registerLogTools(server: Registrar, gate: Gate, { sources, loki,
         }
         const rows = [...groups].sort(([ka, a], [kb, b]) => b.count - a.count || ka.localeCompare(kb))
           .map(([, { row, count }]) => ({ ...row, count }));
-        return { rows, total, partial: entries.length >= ERROR_SCAN_LIMIT };
+        return { from, until, rows, total, partial: entries.length >= ERROR_SCAN_LIMIT };
       });
     }),
   );
